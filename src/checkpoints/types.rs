@@ -89,6 +89,20 @@ pub struct RunRecord {
     pub created_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,
+    pub verified: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunEvidenceRecord {
+    pub id: String,
+    pub run_id: String,
+    pub command: String,
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub duration_ms: i64,
+    pub verified: bool,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

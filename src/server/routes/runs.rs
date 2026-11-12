@@ -30,6 +30,7 @@ pub struct RunSummary {
     pub status: String,
     pub created_at: String,
     pub duration_seconds: f64,
+    pub verified: bool,
 }
 
 #[derive(Serialize)]
@@ -41,6 +42,7 @@ pub struct RunDetail {
     pub completed_at: Option<String>,
     pub output_data: Option<Value>,
     pub current_node_id: Option<String>,
+    pub verified: bool,
 }
 
 #[derive(Deserialize)]
@@ -80,6 +82,7 @@ pub async fn list_runs_handler(
                 status: r.status,
                 created_at: r.created_at,
                 duration_seconds,
+                verified: r.verified,
             }
         })
         .collect();
@@ -111,6 +114,7 @@ pub async fn get_run_handler(
         completed_at: run.completed_at,
         output_data,
         current_node_id: None,
+        verified: run.verified,
     }))
 }
 
@@ -270,6 +274,7 @@ pub async fn fork_run_checkpoint_handler(
         created_at: now.clone(),
         updated_at: now.clone(),
         completed_at: None,
+        verified: false,
     };
     let run_b = RunRecord {
         id: branch_b_id.clone(),
@@ -280,6 +285,7 @@ pub async fn fork_run_checkpoint_handler(
         created_at: now.clone(),
         updated_at: now,
         completed_at: None,
+        verified: false,
     };
     let _ = state.store.insert_run(&run_a);
     let _ = state.store.insert_run(&run_b);
@@ -347,4 +353,23 @@ pub async fn list_run_artifacts_handler(
         .collect();
 
     Ok(Json(res))
+}
+
+pub async fn list_run_evidence_handler(
+    _auth: AuthenticatedUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<crate::checkpoints::types::RunEvidenceRecord>>, ApiError> {
+    let _run = state
+        .store
+        .get_run(&id)
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Run not found"))?;
+
+    let evidence = state
+        .store
+        .list_run_evidence(&id)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(evidence))
 }

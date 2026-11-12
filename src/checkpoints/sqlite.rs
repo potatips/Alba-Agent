@@ -13,7 +13,8 @@ use uuid::Uuid;
 use crate::checkpoints::store::{CheckpointError, CheckpointStore};
 use crate::checkpoints::types::{
     ArtifactRecord, AuditLogEntry, CapsuleRecord, ExecutionPolicyRecord, ForkRunRequest,
-    RunCheckpoint, RunRecord, TrajectoryBranch, WorkflowStepCheckpoint, WorkflowSummary,
+    RunCheckpoint, RunEvidenceRecord, RunRecord, TrajectoryBranch, WorkflowStepCheckpoint,
+    WorkflowSummary,
 };
 use crate::domain::{
     ActionIntentKind, ApprovalDecision, ApprovalRequest, ApprovalStatus, ChatMessage,
@@ -474,6 +475,45 @@ impl SqliteCheckpointStore {
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
         }
 
+        if current_version < 7 {
+            let has_verified: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name = 'verified'",
+                    [],
+                    |r| r.get::<_, i64>(0).map(|c| c > 0),
+                )
+                .unwrap_or(false);
+
+            if !has_verified {
+                let _ = conn.execute(
+                    "ALTER TABLE runs ADD COLUMN verified INTEGER NOT NULL DEFAULT 0",
+                    [],
+                );
+            }
+
+            conn.execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS run_evidence (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    command TEXT NOT NULL,
+                    exit_code INTEGER NOT NULL,
+                    stdout TEXT NOT NULL,
+                    stderr TEXT NOT NULL,
+                    duration_ms INTEGER NOT NULL,
+                    verified INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_run_evidence_run ON run_evidence(run_id);
+
+                INSERT INTO schema_migrations (version, applied_at)
+                VALUES (7, datetime('now'));
+                ",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        }
+
         Ok(())
     }
 
@@ -570,9 +610,10 @@ impl SqliteCheckpointStore {
             .conn
             .lock()
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let verified_int = if run.verified { 1 } else { 0 };
         conn.execute(
-            "INSERT INTO runs (id, workflow_id, status, input_data, output_data, created_at, updated_at, completed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO runs (id, workflow_id, status, input_data, output_data, created_at, updated_at, completed_at, verified)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 run.id,
                 run.workflow_id,
@@ -582,6 +623,7 @@ impl SqliteCheckpointStore {
                 run.created_at,
                 run.updated_at,
                 run.completed_at,
+                verified_int,
             ],
         )
         .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
@@ -615,10 +657,11 @@ impl SqliteCheckpointStore {
             .lock()
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
         conn.query_row(
-            "SELECT id, workflow_id, status, input_data, output_data, created_at, updated_at, completed_at
+            "SELECT id, workflow_id, status, input_data, output_data, created_at, updated_at, completed_at, verified
              FROM runs WHERE id = ?1",
             params![id],
             |r| {
+                let verified_int: i64 = r.get(8)?;
                 Ok(RunRecord {
                     id: r.get(0)?,
                     workflow_id: r.get(1)?,
@@ -628,6 +671,7 @@ impl SqliteCheckpointStore {
                     created_at: r.get(5)?,
                     updated_at: r.get(6)?,
                     completed_at: r.get(7)?,
+                    verified: verified_int == 1,
                 })
             },
         )
@@ -648,7 +692,7 @@ impl SqliteCheckpointStore {
         if let Some(wf_id) = workflow_id {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, workflow_id, status, input_data, output_data, created_at, updated_at, completed_at
+                    "SELECT id, workflow_id, status, input_data, output_data, created_at, updated_at, completed_at, verified
                      FROM runs
                      WHERE workflow_id = ?1
                      ORDER BY created_at DESC
@@ -657,6 +701,7 @@ impl SqliteCheckpointStore {
                 .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
             let rows = stmt
                 .query_map(params![wf_id, limit as i64], |r| {
+                    let verified_int: i64 = r.get(8)?;
                     Ok(RunRecord {
                         id: r.get(0)?,
                         workflow_id: r.get(1)?,
@@ -666,6 +711,7 @@ impl SqliteCheckpointStore {
                         created_at: r.get(5)?,
                         updated_at: r.get(6)?,
                         completed_at: r.get(7)?,
+                        verified: verified_int == 1,
                     })
                 })
                 .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
@@ -675,7 +721,7 @@ impl SqliteCheckpointStore {
         } else {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, workflow_id, status, input_data, output_data, created_at, updated_at, completed_at
+                    "SELECT id, workflow_id, status, input_data, output_data, created_at, updated_at, completed_at, verified
                      FROM runs
                      ORDER BY created_at DESC
                      LIMIT ?1",
@@ -683,6 +729,7 @@ impl SqliteCheckpointStore {
                 .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
             let rows = stmt
                 .query_map(params![limit as i64], |r| {
+                    let verified_int: i64 = r.get(8)?;
                     Ok(RunRecord {
                         id: r.get(0)?,
                         workflow_id: r.get(1)?,
@@ -692,6 +739,7 @@ impl SqliteCheckpointStore {
                         created_at: r.get(5)?,
                         updated_at: r.get(6)?,
                         completed_at: r.get(7)?,
+                        verified: verified_int == 1,
                     })
                 })
                 .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
@@ -700,6 +748,147 @@ impl SqliteCheckpointStore {
             }
         }
         Ok(out)
+    }
+
+    pub fn insert_run_evidence(&self, record: &RunEvidenceRecord) -> Result<(), CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        let effective_verified = record.verified && (record.exit_code == 0);
+        let verified_int = if effective_verified { 1 } else { 0 };
+
+        conn.execute(
+            "INSERT INTO run_evidence (id, run_id, command, exit_code, stdout, stderr, duration_ms, verified, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                record.id,
+                record.run_id,
+                record.command,
+                record.exit_code,
+                record.stdout,
+                record.stderr,
+                record.duration_ms,
+                verified_int,
+                record.created_at,
+            ],
+        )
+        .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        if record.exit_code != 0 {
+            let _ = conn.execute(
+                "UPDATE runs SET verified = 0, updated_at = ?2 WHERE id = ?1",
+                params![record.run_id, Utc::now().to_rfc3339()],
+            );
+        }
+
+        Ok(())
+    }
+
+    pub fn list_run_evidence(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<RunEvidenceRecord>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, run_id, command, exit_code, stdout, stderr, duration_ms, verified, created_at
+                 FROM run_evidence WHERE run_id = ?1 ORDER BY created_at ASC",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![run_id], |r| {
+                let verified_int: i64 = r.get(7)?;
+                Ok(RunEvidenceRecord {
+                    id: r.get(0)?,
+                    run_id: r.get(1)?,
+                    command: r.get(2)?,
+                    exit_code: r.get(3)?,
+                    stdout: r.get(4)?,
+                    stderr: r.get(5)?,
+                    duration_ms: r.get(6)?,
+                    verified: verified_int == 1,
+                    created_at: r.get(8)?,
+                })
+            })
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| CheckpointError::DatabaseError(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
+    pub fn mark_run_verified(&self, run_id: &str, verified: bool) -> Result<bool, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        if verified {
+            let non_zero_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM run_evidence WHERE run_id = ?1 AND exit_code != 0",
+                    params![run_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+            if non_zero_count > 0 {
+                conn.execute(
+                    "UPDATE runs SET verified = 0, updated_at = ?2 WHERE id = ?1",
+                    params![run_id, Utc::now().to_rfc3339()],
+                )
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+                return Ok(false);
+            }
+
+            let evidence_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM run_evidence WHERE run_id = ?1",
+                    params![run_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+            if evidence_count == 0 {
+                return Ok(false);
+            }
+        }
+
+        let val = if verified { 1 } else { 0 };
+        let updated = conn
+            .execute(
+                "UPDATE runs SET verified = ?2, updated_at = ?3 WHERE id = ?1",
+                params![run_id, val, Utc::now().to_rfc3339()],
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        Ok(updated > 0 && verified)
+    }
+
+    pub fn is_run_verified(&self, run_id: &str) -> Result<bool, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let verified: i64 = conn
+            .query_row(
+                "SELECT verified FROM runs WHERE id = ?1",
+                params![run_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?
+            .unwrap_or(0);
+        Ok(verified == 1)
     }
 
     pub fn insert_artifact(&self, artifact: &ArtifactRecord) -> Result<(), CheckpointError> {

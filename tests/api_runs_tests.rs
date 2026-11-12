@@ -200,6 +200,7 @@ async fn test_api_resume_consumed_tool_not_reexecuted() {
         created_at: now.clone(),
         updated_at: now.clone(),
         completed_at: None,
+        verified: false,
     };
     store.insert_run(&run_rec).unwrap();
 
@@ -325,6 +326,7 @@ async fn test_api_resume_executing_tool_fails_closed() {
         created_at: now.clone(),
         updated_at: now.clone(),
         completed_at: None,
+        verified: false,
     };
     store.insert_run(&run_rec).unwrap();
 
@@ -497,6 +499,7 @@ async fn test_api_resume_completed_run_rejected() {
         created_at: now.clone(),
         updated_at: now.clone(),
         completed_at: Some(now),
+        verified: false,
     };
     store.insert_run(&run_rec).unwrap();
 
@@ -532,6 +535,7 @@ async fn test_api_cancel_run() {
         created_at: now.clone(),
         updated_at: now.clone(),
         completed_at: None,
+        verified: false,
     };
     store.insert_run(&run_rec).unwrap();
 
@@ -573,6 +577,7 @@ async fn test_api_checkpoints_fork_rewind_artifacts() {
         created_at: now.clone(),
         updated_at: now.clone(),
         completed_at: None,
+        verified: false,
     };
     store.insert_run(&run_rec).unwrap();
 

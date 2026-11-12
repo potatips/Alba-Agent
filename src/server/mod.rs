@@ -15,7 +15,7 @@ use crate::server::routes::capsules::list_capsules_handler;
 use crate::server::routes::health::health_handler;
 use crate::server::routes::runs::{
     cancel_run_handler, fork_run_checkpoint_handler, get_run_handler, list_run_artifacts_handler,
-    list_run_checkpoints_handler, list_runs_handler, resume_run_handler,
+    list_run_checkpoints_handler, list_run_evidence_handler, list_runs_handler, resume_run_handler,
     rewind_run_checkpoint_handler,
 };
 use crate::server::routes::settings::{
@@ -76,6 +76,7 @@ pub fn create_app(state: AppState) -> Router {
             "/api/v1/runs/{id}/artifacts",
             get(list_run_artifacts_handler),
         )
+        .route("/api/v1/runs/{id}/evidence", get(list_run_evidence_handler))
         .route("/api/v1/approvals", get(list_approvals_handler))
         .route(
             "/api/v1/approvals/{id}/resolve",

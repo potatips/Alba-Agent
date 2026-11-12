@@ -178,6 +178,7 @@ pub async fn create_workflow_run_handler(
         created_at: now.clone(),
         updated_at: now,
         completed_at: None,
+        verified: false,
     };
 
     state

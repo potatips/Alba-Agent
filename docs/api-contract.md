@@ -382,6 +382,26 @@ The frontend is the unmodified `NexusAgent/apps/web` (Next.js 15, Tailwind v3).
   ]
   ```
 
+### 19b. `GET /api/v1/runs/:id/evidence`
+- **Purpose**: Lists machine verification command runs, terminal outputs, exit codes, and verification status for run auditing.
+- **Headers**: `Authorization: Bearer <token>`
+- **Response**: `200 OK`
+  ```json
+  [
+    {
+      "id": "evi-001",
+      "run_id": "run-01934e8f",
+      "command": "cargo test --test integration_tests",
+      "exit_code": 0,
+      "stdout": "test result: ok. 10 passed; 0 failed",
+      "stderr": "",
+      "duration_ms": 320,
+      "verified": true,
+      "created_at": "2026-11-12T15:00:00Z"
+    }
+  ]
+  ```
+
 ### 20. `GET /api/v1/learning-transfer/capsules`
 - **Purpose**: Returns knowledge capsules and negative-transfer guards.
 - **Headers**: `Authorization: Bearer <token>`

@@ -85,6 +85,7 @@ pub fn create_app(state: AppState) -> Router {
             "/api/v1/learning-transfer/capsules",
             get(list_capsules_handler),
         )
+        .route("/api/v1/capsules/search", get(list_capsules_handler))
         .route("/api/v1/settings/chat-models", get(get_chat_models_handler))
         .route(
             "/api/v1/settings/execution",

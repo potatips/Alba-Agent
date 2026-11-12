@@ -46,12 +46,16 @@ pub struct ServerModelClient {
 
 impl ServerModelClient {
     pub fn new() -> Self {
-        let api_key = std::env::var("NEXUS_API_KEY").unwrap_or_default();
-        let mock_mode = std::env::var("NEXUS_MOCK_MODEL").unwrap_or_default() == "true";
-        if !api_key.trim().is_empty() && !mock_mode {
-            let api_base = std::env::var("NEXUS_MODEL_BASE_URL")
+        let api_key = std::env::var("OPENAI_API_KEY")
+            .or_else(|_| std::env::var("NEXUS_API_KEY"))
+            .unwrap_or_default();
+        if !api_key.trim().is_empty() {
+            let api_base = std::env::var("OPENAI_BASE_URL")
+                .or_else(|_| std::env::var("NEXUS_MODEL_BASE_URL"))
                 .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
-            let model = std::env::var("NEXUS_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
+            let model = std::env::var("OPENAI_MODEL")
+                .or_else(|_| std::env::var("NEXUS_MODEL"))
+                .unwrap_or_else(|_| "gpt-4o-mini".to_string());
             let client = OpenAiCompatibleClient::new(ModelConfig::new(api_base, api_key, model))
                 .ok()
                 .map(Arc::new);
@@ -62,6 +66,12 @@ impl ServerModelClient {
             Self {
                 openai_client: None,
             }
+        }
+    }
+
+    pub fn with_client(client: OpenAiCompatibleClient) -> Self {
+        Self {
+            openai_client: Some(Arc::new(client)),
         }
     }
 }
@@ -76,37 +86,10 @@ impl ModelClient for ServerModelClient {
     async fn complete(&self, request: &ModelRequest) -> Result<ModelResponse, ModelError> {
         if let Some(ref client) = self.openai_client {
             client.complete(request).await
-        } else if let Ok(mock_json) = std::env::var("ALBA_MOCK_TOOL_CALL") {
-            let has_tool_response = request
-                .messages
-                .iter()
-                .any(|m| m.role == crate::domain::MessageRole::Tool);
-            if has_tool_response {
-                Ok(ModelResponse {
-                    content: Some("Task finished with tool result".to_string()),
-                    tool_calls: vec![],
-                    usage: None,
-                })
-            } else if let Ok(tc) = serde_json::from_str::<crate::domain::ToolCall>(&mock_json) {
-                Ok(ModelResponse {
-                    content: None,
-                    tool_calls: vec![tc],
-                    usage: None,
-                })
-            } else {
-                Ok(ModelResponse {
-                    content: Some("Task executed successfully".to_string()),
-                    tool_calls: vec![],
-                    usage: None,
-                })
-            }
         } else {
-            let content = "Task executed successfully by agent in workflow.";
-            Ok(ModelResponse {
-                content: Some(content.to_string()),
-                tool_calls: vec![],
-                usage: None,
-            })
+            Err(ModelError::ConfigurationError(
+                "no model configured: set OPENAI_API_KEY / --api-base".to_string(),
+            ))
         }
     }
 }
@@ -139,7 +122,7 @@ pub async fn run_workflow_background(
     };
     let _ = event_sink.emit(start_event);
 
-    let model = Arc::new(ServerModelClient::new());
+    let model = Arc::new(state.model.clone().unwrap_or_default());
     let policy = Arc::new(DefaultApprovalPolicy::new().with_workspace_root(&state.workspace_root));
     let mut registry = ToolRegistry::new();
     register_workspace_tools(
@@ -189,7 +172,7 @@ pub async fn resume_workflow_background(
     };
     let _ = event_sink.emit(resume_event);
 
-    let model = Arc::new(ServerModelClient::new());
+    let model = Arc::new(state.model.clone().unwrap_or_default());
     let policy = Arc::new(DefaultApprovalPolicy::new().with_workspace_root(&state.workspace_root));
     let mut registry = ToolRegistry::new();
     register_workspace_tools(

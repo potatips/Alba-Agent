@@ -74,7 +74,17 @@ where
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         match axum::Json::<T>::from_request(req, state).await {
             Ok(axum::Json(val)) => Ok(AppJson(val)),
-            Err(rejection) => Err(ApiError::unprocessable(rejection.body_text())),
+            Err(rejection) => {
+                let status = rejection.status();
+                if status == StatusCode::PAYLOAD_TOO_LARGE {
+                    Err(ApiError::new(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        rejection.body_text(),
+                    ))
+                } else {
+                    Err(ApiError::unprocessable(rejection.body_text()))
+                }
+            }
         }
     }
 }

@@ -8,7 +8,8 @@ The frontend is the unmodified `NexusAgent/apps/web` (Next.js 15, Tailwind v3).
 ### Endpoint Census Summary
 - **Total Audited Endpoints in `apps/web/src`**: 63 unique route/method signatures.
 - **Minimal v1 Set (Required)**: 24 endpoints providing full end-to-end execution, local-mode authentication, workflow authoring, run execution, live SSE streaming, approval gates, checkpoint inspection, time-travel fork/rewind, verified artifacts, knowledge capsules, and sandbox execution policy.
-- **Deferred / Out of Scope for v1**: 39 endpoints covering Architect LLM generator, continuous team evolution, FinOps model distillation, scheduled background routines, external Qdrant knowledge bases, and remote sandbox video/screen streaming (scheduled for post-v1 Phase G8).
+- **Additional Web Compatibility Endpoints**: 5 endpoints implemented specifically to satisfy unmodified `apps/web` components without console errors (`/api/v1/workflows/validate`, `/api/v1/workflows/import`, `/api/v1/conversations`, `/api/v1/templates`, `/api/v1/skills`).
+- **Deferred / Out of Scope for v1**: 34 endpoints covering Architect LLM generator, continuous team evolution, FinOps model distillation, scheduled background routines, external Qdrant knowledge bases, and remote sandbox video/screen streaming (scheduled for post-v1 Phase G8).
 
 ---
 

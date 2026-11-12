@@ -1,7 +1,7 @@
 use axum::extract::State;
 use axum::Json;
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::server::auth::{
     sign_token, AuthenticatedUser, LocalSessionClaims, DEFAULT_LOCAL_TENANT_ID,
@@ -24,6 +24,13 @@ pub struct LocalSessionResponse {
     pub expires_in: i64,
 }
 
+#[derive(Deserialize, Default)]
+pub struct LocalSessionRequest {
+    pub display_name: Option<String>,
+    pub email: Option<String>,
+    pub sub: Option<String>,
+}
+
 #[derive(Serialize)]
 pub struct MeResponse {
     pub email: String,
@@ -37,15 +44,25 @@ pub async fn local_mode_handler() -> Json<LocalModeResponse> {
 
 pub async fn local_session_handler(
     State(state): State<AppState>,
+    bytes: axum::body::Bytes,
 ) -> Result<Json<LocalSessionResponse>, ApiError> {
+    let req: LocalSessionRequest = if bytes.is_empty() {
+        LocalSessionRequest::default()
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or_default()
+    };
     let expires_in: i64 = 86400;
     let exp = Utc::now().timestamp() + expires_in;
     let claims = LocalSessionClaims {
-        sub: DEFAULT_LOCAL_USER_ID.to_string(),
+        sub: req.sub.unwrap_or_else(|| DEFAULT_LOCAL_USER_ID.to_string()),
         tenant_id: DEFAULT_LOCAL_TENANT_ID.to_string(),
         workspace_id: DEFAULT_LOCAL_WORKSPACE_ID.to_string(),
-        email: DEFAULT_LOCAL_USER_EMAIL.to_string(),
-        display_name: DEFAULT_LOCAL_USER_DISPLAY_NAME.to_string(),
+        email: req
+            .email
+            .unwrap_or_else(|| DEFAULT_LOCAL_USER_EMAIL.to_string()),
+        display_name: req
+            .display_name
+            .unwrap_or_else(|| DEFAULT_LOCAL_USER_DISPLAY_NAME.to_string()),
         plan: DEFAULT_LOCAL_USER_PLAN.to_string(),
         exp,
     };

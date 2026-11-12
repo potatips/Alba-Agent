@@ -346,3 +346,268 @@ async fn test_contract_tools_builtin_endpoint() {
     assert!(tools.iter().any(|t| t["id"] == "file_read"));
     assert!(tools.iter().any(|t| t["id"] == "file_write"));
 }
+
+#[tokio::test]
+async fn test_payload_too_large_returns_413() {
+    let (base_url, _tmp) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let session_res = client
+        .post(format!("{}/api/v1/auth/local-session", base_url))
+        .send()
+        .await
+        .unwrap();
+    let token = session_res.json::<Value>().await.unwrap()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let big_payload = "a".repeat(3 * 1024 * 1024);
+    let res = client
+        .post(format!("{}/api/v1/workflows", base_url))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(big_payload)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn test_contract_workflows_list_and_get_and_put() {
+    let (base_url, _tmp) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let session_res = client
+        .post(format!("{}/api/v1/auth/local-session", base_url))
+        .send()
+        .await
+        .unwrap();
+    let token = session_res.json::<Value>().await.unwrap()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let wf_id = Uuid::new_v4();
+    let mut spec = create_valid_workflow(wf_id);
+    spec.name = "Contract Spec".to_string();
+
+    let create_res = client
+        .post(format!("{}/api/v1/workflows", base_url))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&spec)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_res.status(), reqwest::StatusCode::CREATED);
+
+    let list_res = client
+        .get(format!("{}/api/v1/workflows?limit=10", base_url))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_res.status(), reqwest::StatusCode::OK);
+    let list_body: Vec<Value> = list_res.json().await.unwrap();
+    assert_eq!(list_body.len(), 1);
+    assert_eq!(list_body[0]["id"], wf_id.to_string());
+    assert_eq!(list_body[0]["name"], "Contract Spec");
+
+    let get_res = client
+        .get(format!("{}/api/v1/workflows/{}", base_url, wf_id))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_res.status(), reqwest::StatusCode::OK);
+    let get_body: Value = get_res.json().await.unwrap();
+    assert_eq!(get_body["id"], wf_id.to_string());
+
+    let mut updated_spec = spec.clone();
+    updated_spec.name = "Contract Spec Updated".to_string();
+    let put_res = client
+        .put(format!("{}/api/v1/workflows/{}", base_url, wf_id))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&updated_spec)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put_res.status(), reqwest::StatusCode::OK);
+    let put_body: Value = put_res.json().await.unwrap();
+    assert_eq!(put_body["name"], "Contract Spec Updated");
+}
+
+#[tokio::test]
+async fn test_contract_workflows_validate_and_import() {
+    let (base_url, _tmp) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let session_res = client
+        .post(format!("{}/api/v1/auth/local-session", base_url))
+        .send()
+        .await
+        .unwrap();
+    let token = session_res.json::<Value>().await.unwrap()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let wf_id = Uuid::new_v4();
+    let mut spec = create_valid_workflow(wf_id);
+    spec.name = "Validate and Import Spec".to_string();
+
+    let validate_res = client
+        .post(format!("{}/api/v1/workflows/validate", base_url))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&spec)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(validate_res.status(), reqwest::StatusCode::OK);
+    let val_body: Value = validate_res.json().await.unwrap();
+    assert_eq!(val_body["valid"], true);
+
+    let import_wf_id = Uuid::new_v4();
+    let mut import_spec = create_valid_workflow(import_wf_id);
+    import_spec.name = "Imported Spec".to_string();
+    let import_res = client
+        .post(format!("{}/api/v1/workflows/import", base_url))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&import_spec)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(import_res.status(), reqwest::StatusCode::OK);
+    let imp_body: Value = import_res.json().await.unwrap();
+    assert_eq!(imp_body["id"], import_wf_id.to_string());
+}
+
+#[tokio::test]
+async fn test_contract_runs_list_and_get_shape() {
+    let (base_url, _tmp) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let session_res = client
+        .post(format!("{}/api/v1/auth/local-session", base_url))
+        .send()
+        .await
+        .unwrap();
+    let token = session_res.json::<Value>().await.unwrap()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let wf_id = Uuid::new_v4();
+    let spec = create_valid_workflow(wf_id);
+
+    client
+        .post(format!("{}/api/v1/workflows", base_url))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&spec)
+        .send()
+        .await
+        .unwrap();
+
+    let run_res = client
+        .post(format!("{}/api/v1/workflows/{}/runs", base_url, wf_id))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&serde_json::json!({
+            "initial_input": {"data": 123}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(run_res.status(), reqwest::StatusCode::ACCEPTED);
+    let run_body: Value = run_res.json().await.unwrap();
+    let run_id = run_body["run_id"].as_str().unwrap();
+
+    let runs_list = client
+        .get(format!("{}/api/v1/runs?workflow_id={}", base_url, wf_id))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(runs_list.status(), reqwest::StatusCode::OK);
+    let list_arr: Vec<Value> = runs_list.json().await.unwrap();
+    assert_eq!(list_arr.len(), 1);
+    assert_eq!(list_arr[0]["id"], run_id);
+
+    let run_get = client
+        .get(format!("{}/api/v1/runs/{}", base_url, run_id))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(run_get.status(), reqwest::StatusCode::OK);
+    let get_detail: Value = run_get.json().await.unwrap();
+    assert_eq!(get_detail["id"], run_id);
+    assert!(get_detail["status"].is_string());
+}
+
+#[tokio::test]
+async fn test_contract_capsules_search_shape() {
+    let (base_url, _tmp) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let session_res = client
+        .post(format!("{}/api/v1/auth/local-session", base_url))
+        .send()
+        .await
+        .unwrap();
+    let token = session_res.json::<Value>().await.unwrap()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let res = client
+        .get(format!("{}/api/v1/capsules/search?q=test", base_url))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), reqwest::StatusCode::OK);
+    let body: Vec<Value> = res.json().await.unwrap();
+    assert!(!body.is_empty());
+}
+
+#[tokio::test]
+async fn test_contract_skills_conversations_templates() {
+    let (base_url, _tmp) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let session_res = client
+        .post(format!("{}/api/v1/auth/local-session", base_url))
+        .send()
+        .await
+        .unwrap();
+    let token = session_res.json::<Value>().await.unwrap()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let skills_res = client
+        .get(format!("{}/api/v1/skills", base_url))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(skills_res.status(), reqwest::StatusCode::OK);
+    let skills_body: Vec<Value> = skills_res.json().await.unwrap();
+    assert!(skills_body.is_empty());
+
+    let conv_res = client
+        .get(format!("{}/api/v1/conversations", base_url))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(conv_res.status(), reqwest::StatusCode::OK);
+    let conv_body: Vec<Value> = conv_res.json().await.unwrap();
+    assert!(conv_body.is_empty());
+
+    let templ_res = client
+        .get(format!("{}/api/v1/templates", base_url))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(templ_res.status(), reqwest::StatusCode::OK);
+    let templ_body: Vec<Value> = templ_res.json().await.unwrap();
+    assert!(templ_body.is_empty());
+}

@@ -6,6 +6,7 @@ use tokio::sync::{broadcast, watch, Mutex};
 use crate::checkpoints::SqliteCheckpointStore;
 use crate::events::RuntimeEvent;
 use crate::server::auth::DEFAULT_JWT_SECRET;
+use crate::server::workflow_runner::ServerModelClient;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -14,6 +15,7 @@ pub struct AppState {
     pub active_cancellations: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     pub jwt_secret: String,
     pub workspace_root: PathBuf,
+    pub model: Option<ServerModelClient>,
 }
 
 impl AppState {
@@ -25,6 +27,12 @@ impl AppState {
             active_cancellations: Arc::new(Mutex::new(HashMap::new())),
             jwt_secret: DEFAULT_JWT_SECRET.to_string(),
             workspace_root,
+            model: None,
         }
+    }
+
+    pub fn with_model(mut self, model: ServerModelClient) -> Self {
+        self.model = Some(model);
+        self
     }
 }

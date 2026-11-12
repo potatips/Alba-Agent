@@ -8,6 +8,7 @@ use nexus_albaai::schema::node::{
 use nexus_albaai::schema::task::TaskSpec;
 use nexus_albaai::schema::workflow::{WorkflowEdgeSpec, WorkflowModesSpec, WorkflowSpec};
 use nexus_albaai::server::state::AppState;
+use nexus_albaai::server::workflow_runner::ServerModelClient;
 use nexus_albaai::workflow::state::{WorkflowExecutionContext, WorkflowRunState};
 use reqwest::header::AUTHORIZATION;
 use reqwest::StatusCode;
@@ -18,7 +19,22 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
+mod common;
+use common::{MockResponse, TestHttpServer};
+
 async fn spawn_test_server() -> (
+    String,
+    Arc<SqliteCheckpointStore>,
+    AppState,
+    PathBuf,
+    tempfile::TempDir,
+) {
+    spawn_test_server_with_model(None).await
+}
+
+async fn spawn_test_server_with_model(
+    model: Option<ServerModelClient>,
+) -> (
     String,
     Arc<SqliteCheckpointStore>,
     AppState,
@@ -30,7 +46,10 @@ async fn spawn_test_server() -> (
     let workspace_root = tmp.path().join("workspace");
     std::fs::create_dir_all(&workspace_root).unwrap();
     let store = Arc::new(SqliteCheckpointStore::new(&db_path).unwrap());
-    let state = AppState::new(store.clone(), workspace_root.clone());
+    let mut state = AppState::new(store.clone(), workspace_root.clone());
+    if let Some(m) = model {
+        state = state.with_model(m);
+    }
     let state_for_server = state.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -131,25 +150,29 @@ fn create_crew_workflow(wf_id: Uuid, crew_id: &str) -> WorkflowSpec {
     }
 }
 
-static TEST_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 #[tokio::test]
 async fn test_api_resume_consumed_tool_not_reexecuted() {
-    let _env_guard = TEST_ENV_LOCK.lock().await;
-    std::env::set_var(
-        "ALBA_MOCK_TOOL_CALL",
+    let mock_server = TestHttpServer::start().await;
+    mock_server.enqueue_response(MockResponse::tool_call(
+        "call_consumed_789",
+        "write_file",
         serde_json::json!({
-            "id": "call_consumed_789",
-            "name": "write_file",
-            "arguments": {
-                "path": "consumed_side_effect.txt",
-                "content": "real_execution_content\n"
-            }
-        })
-        .to_string(),
-    );
+            "path": "consumed_side_effect.txt",
+            "content": "real_execution_content\n"
+        }),
+    ));
+    mock_server.enqueue_response(MockResponse::final_answer("Task completed"));
 
-    let (base_url, store, _state, workspace_root, _tmp) = spawn_test_server().await;
+    let client_config = nexus_albaai::models::types::ModelConfig::new(
+        mock_server.url(),
+        "mock-key".to_string(),
+        "mock-model".to_string(),
+    );
+    let open_client = nexus_albaai::models::OpenAiCompatibleClient::new(client_config).unwrap();
+    let server_model = ServerModelClient::with_client(open_client);
+
+    let (base_url, store, _state, workspace_root, _tmp) =
+        spawn_test_server_with_model(Some(server_model)).await;
     let client = reqwest::Client::new();
     let token = get_token(&client, &base_url).await;
 
@@ -251,27 +274,31 @@ async fn test_api_resume_consumed_tool_not_reexecuted() {
         !side_effect_path.exists(),
         "Consumed tool call was re-executed: side effect file must not exist"
     );
-
-    std::env::remove_var("ALBA_MOCK_TOOL_CALL");
 }
 
 #[tokio::test]
 async fn test_api_resume_executing_tool_fails_closed() {
-    let _env_guard = TEST_ENV_LOCK.lock().await;
-    std::env::set_var(
-        "ALBA_MOCK_TOOL_CALL",
+    let mock_server = TestHttpServer::start().await;
+    mock_server.enqueue_response(MockResponse::tool_call(
+        "call_executing_456",
+        "write_file",
         serde_json::json!({
-            "id": "call_executing_456",
-            "name": "write_file",
-            "arguments": {
-                "path": "executing_side_effect.txt",
-                "content": "test\n"
-            }
-        })
-        .to_string(),
-    );
+            "path": "executing_side_effect.txt",
+            "content": "test\n"
+        }),
+    ));
+    mock_server.enqueue_response(MockResponse::final_answer("Task completed"));
 
-    let (base_url, store, _state, workspace_root, _tmp) = spawn_test_server().await;
+    let client_config = nexus_albaai::models::types::ModelConfig::new(
+        mock_server.url(),
+        "mock-key".to_string(),
+        "mock-model".to_string(),
+    );
+    let open_client = nexus_albaai::models::OpenAiCompatibleClient::new(client_config).unwrap();
+    let server_model = ServerModelClient::with_client(open_client);
+
+    let (base_url, store, _state, workspace_root, _tmp) =
+        spawn_test_server_with_model(Some(server_model)).await;
     let client = reqwest::Client::new();
     let token = get_token(&client, &base_url).await;
 
@@ -375,8 +402,82 @@ async fn test_api_resume_executing_tool_fails_closed() {
         !side_effect_path.exists(),
         "Executing tool call was re-executed: side effect file must not exist"
     );
+}
 
-    std::env::remove_var("ALBA_MOCK_TOOL_CALL");
+#[tokio::test]
+async fn test_api_run_with_no_model_configured_fails_loudly() {
+    let (base_url, store, _state, _workspace_root, _tmp) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let token = get_token(&client, &base_url).await;
+
+    let wf_id = Uuid::new_v4();
+    let crew_id = "crew_no_model";
+    let spec = create_crew_workflow(wf_id, crew_id);
+
+    let create_resp = client
+        .post(format!("{}/api/v1/workflows", base_url))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&spec)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+
+    let run_resp = client
+        .post(format!("{}/api/v1/workflows/{}/runs", base_url, wf_id))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&serde_json::json!({
+            "initial_input": {"task": "do work"}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(run_resp.status(), StatusCode::ACCEPTED);
+    let run_body: Value = run_resp.json().await.unwrap();
+    let run_id = run_body["run_id"].as_str().unwrap();
+
+    let mut failed_loudly = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let get_resp = client
+            .get(format!("{}/api/v1/runs/{}", base_url, run_id))
+            .header(AUTHORIZATION, format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        let detail: Value = get_resp.json().await.unwrap();
+        let status = detail["status"].as_str().unwrap();
+        if status == "FAILED" {
+            failed_loudly = true;
+            break;
+        } else if status == "SUCCEEDED" {
+            panic!("Run with no model configured must never succeed");
+        }
+    }
+
+    assert!(
+        failed_loudly,
+        "Run with no model configured must fail loudly with FAILED status"
+    );
+
+    let get_resp = client
+        .get(format!("{}/api/v1/runs/{}", base_url, run_id))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .send()
+        .await
+        .unwrap();
+    let detail: Value = get_resp.json().await.unwrap();
+    let error_text = detail.to_string();
+    let events = store.list_run_events(run_id, None).unwrap();
+
+    let has_model_err_msg = error_text.contains("no model configured")
+        || events
+            .iter()
+            .any(|ev| ev.payload.to_string().contains("no model configured"));
+    assert!(
+        has_model_err_msg,
+        "Error message must contain 'no model configured: set OPENAI_API_KEY / --api-base'"
+    );
 }
 
 #[tokio::test]

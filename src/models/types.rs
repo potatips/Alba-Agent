@@ -16,6 +16,8 @@ pub enum ModelError {
     InvalidResponse(String),
     #[error("Request timed out: {0}")]
     Timeout(String),
+    #[error("{0}")]
+    ConfigurationError(String),
 }
 
 #[derive(Clone)]

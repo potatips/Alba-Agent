@@ -60,7 +60,7 @@ fn create_crew_workflow(wf_id: Uuid, crew_id: &str) -> WorkflowSpec {
         goal: "Execute tools".to_string(),
         backstory: "Experienced worker".to_string(),
         model: "default-model".to_string(),
-        tool_ids: vec!["file_write".to_string()],
+        tool_ids: vec!["write_file".to_string()],
         skill_ids: vec![],
         max_iterations: 10,
         temperature: 0.2,
@@ -140,7 +140,7 @@ async fn test_api_resume_consumed_tool_not_reexecuted() {
         "ALBA_MOCK_TOOL_CALL",
         serde_json::json!({
             "id": "call_consumed_789",
-            "name": "file_write",
+            "name": "write_file",
             "arguments": {
                 "path": "consumed_side_effect.txt",
                 "content": "real_execution_content\n"
@@ -212,7 +212,7 @@ async fn test_api_resume_consumed_tool_not_reexecuted() {
         ).unwrap();
         guard.execute(
             "INSERT INTO tool_journal (run_id, tenant_id, workspace_id, node_id, tool_call_id, tool_name, arguments_json, status, output_text, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, 'call_consumed_789', 'file_write', '{\"path\":\"consumed_side_effect.txt\"}', 'consumed', '{\"status\":\"ok\"}', ?5, ?5)",
+             VALUES (?1, ?2, ?3, ?4, 'call_consumed_789', 'write_file', '{\"path\":\"consumed_side_effect.txt\"}', 'consumed', '{\"status\":\"ok\"}', ?5, ?5)",
             rusqlite::params![run_id, tenant_id, workspace_id, crew_id, now],
         ).unwrap();
     }
@@ -262,7 +262,7 @@ async fn test_api_resume_executing_tool_fails_closed() {
         "ALBA_MOCK_TOOL_CALL",
         serde_json::json!({
             "id": "call_executing_456",
-            "name": "file_write",
+            "name": "write_file",
             "arguments": {
                 "path": "executing_side_effect.txt",
                 "content": "test\n"
@@ -271,7 +271,7 @@ async fn test_api_resume_executing_tool_fails_closed() {
         .to_string(),
     );
 
-    let (base_url, store, _state, _workspace_root, _tmp) = spawn_test_server().await;
+    let (base_url, store, _state, workspace_root, _tmp) = spawn_test_server().await;
     let client = reqwest::Client::new();
     let token = get_token(&client, &base_url).await;
 
@@ -333,7 +333,7 @@ async fn test_api_resume_executing_tool_fails_closed() {
         ).unwrap();
         guard.execute(
             "INSERT INTO tool_journal (run_id, tenant_id, workspace_id, node_id, tool_call_id, tool_name, arguments_json, status, output_text, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, 'call_executing_456', 'file_write', '{\"path\":\"executing_side_effect.txt\"}', 'executing', NULL, ?5, ?5)",
+             VALUES (?1, ?2, ?3, ?4, 'call_executing_456', 'write_file', '{\"path\":\"executing_side_effect.txt\"}', 'executing', NULL, ?5, ?5)",
             rusqlite::params![run_id, tenant_id, workspace_id, crew_id, now],
         ).unwrap();
     }
@@ -368,6 +368,12 @@ async fn test_api_resume_executing_tool_fails_closed() {
     assert!(
         failed_closed,
         "Run must fail closed when a tool call was left in executing status"
+    );
+
+    let side_effect_path = workspace_root.join("executing_side_effect.txt");
+    assert!(
+        !side_effect_path.exists(),
+        "Executing tool call was re-executed: side effect file must not exist"
     );
 
     std::env::remove_var("ALBA_MOCK_TOOL_CALL");

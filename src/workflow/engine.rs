@@ -612,7 +612,13 @@ where
             max_tokens: None,
             model_override: Some(manager.model.clone()),
         };
-        let _plan_resp = self.model_client.complete(&req).await?;
+        let plan_resp = self.model_client.complete(&req).await?;
+        let plan_text = plan_resp
+            .content
+            .unwrap_or_else(|| "Hierarchical plan established".to_string());
+        context
+            .task_outputs
+            .insert(format!("{}_plan", manager_id), plan_text);
 
         for task in &crew_spec.tasks {
             self.execute_crew_task(scope, context, crew_spec, task)
@@ -649,6 +655,17 @@ where
             "Task: {}\nExpected Output: {}\nOutput Schema: {}",
             task.description, task.expected_output, task.output_schema
         );
+
+        if crew_spec.process == CrewProcess::Hierarchical {
+            if let Some(mgr_id) = &crew_spec.manager_agent_id {
+                if let Some(plan) = context.task_outputs.get(&format!("{}_plan", mgr_id)) {
+                    user_text.push_str(&format!(
+                        "\n\nManager Directives from {}:\n{}",
+                        mgr_id, plan
+                    ));
+                }
+            }
+        }
 
         if !task.context_task_ids.is_empty() {
             user_text.push_str("\n\nContext from previous tasks:\n");

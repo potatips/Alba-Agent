@@ -43,7 +43,7 @@
   - [x] S3 Approval Gate: ApprovalGate pauses run (AwaitingApproval), CLI approve/deny, author != approver separation, fail-closed audit.
   - [x] S4 Resume & Crash Safety: Tool idempotency journal in SQLite, resume from checkpoint, SIGKILL recovery test.
   - [x] S5 Router, loop_back, ParallelBranch: Router rule evaluation, max_loop_iterations enforcement, join=all and join=any.
-  - [ ] S6 Hierarchical Crew: Manager agent delegates to specialist agents via spec.
+  - [x] S6 Hierarchical Crew: Manager agent delegates to specialist agents via spec.
   - [ ] S7 Fork & Time-Travel: fork run from checkpoint, rewind to checkpoint, hash compare.
   - [ ] S8 CLI & Sample Workflow: CLI commands and 3-agent approval sample, end-to-end scenario automated in cargo test.
 - [ ] G3 Compatible API: axum serves `/api/v1` + SSE; apps/web completes one run end-to-end.

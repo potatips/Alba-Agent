@@ -60,9 +60,11 @@ pub async fn local_session_handler(
         email: req
             .email
             .unwrap_or_else(|| DEFAULT_LOCAL_USER_EMAIL.to_string()),
-        display_name: req
-            .display_name
-            .unwrap_or_else(|| DEFAULT_LOCAL_USER_DISPLAY_NAME.to_string()),
+        display_name: req.display_name.unwrap_or_else(|| {
+            std::env::var("NEXUS_ACTOR_ID")
+                .or_else(|_| std::env::var("NEXUS_USER_DISPLAY_NAME"))
+                .unwrap_or_else(|_| DEFAULT_LOCAL_USER_DISPLAY_NAME.to_string())
+        }),
         plan: DEFAULT_LOCAL_USER_PLAN.to_string(),
         exp,
     };

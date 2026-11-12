@@ -9,6 +9,7 @@ pub mod sandbox;
 pub mod schema;
 pub mod server;
 pub mod tools;
+pub mod verification;
 pub mod workflow;
 
 pub use agent::{AgentEngine, AgentState, EngineError, EngineOutcome};
@@ -38,6 +39,10 @@ pub use tools::{
     compute_unified_diff, preview_write_diff, register_workspace_tools, scan_directory, BoxFuture,
     DirEntryItem, DirScanResult, ListDirTool, ReadFileTool, RunCommandTool, Tool, ToolDefinition,
     ToolError, ToolRegistry, WriteDiffPreview, WriteFileTool,
+};
+pub use verification::{
+    is_document_suffix, is_signature_ok, is_text_suffix, render_document, ArtifactCheck,
+    ArtifactContractHook, ArtifactContractReport, CheckStatus,
 };
 pub use workflow::{
     FlowEdge, FlowError, FlowExecutor, FlowNode, FlowNodeKind, FlowOutcome, FlowRouteRule,

@@ -350,6 +350,32 @@ impl SqliteCheckpointStore {
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
         }
 
+        if current_version < 4 {
+            conn.execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS tool_journal (
+                    run_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL,
+                    node_id TEXT NOT NULL,
+                    tool_call_id TEXT NOT NULL,
+                    tool_name TEXT NOT NULL,
+                    arguments_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    output_text TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(run_id, node_id, tool_call_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_tool_journal_scope ON tool_journal(tenant_id, workspace_id, run_id);
+
+                INSERT INTO schema_migrations (version, applied_at)
+                VALUES (4, datetime('now'));
+                ",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        }
+
         Ok(())
     }
 }
@@ -1681,5 +1707,116 @@ impl CheckpointStore for SqliteCheckpointStore {
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
 
         Ok(true)
+    }
+
+    async fn record_tool_call(
+        &self,
+        scope: &ExecutionScope,
+        node_id: &str,
+        tool_call_id: &str,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<(), CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let now = Utc::now().to_rfc3339();
+        let args_json = serde_json::to_string(arguments)
+            .map_err(|e| CheckpointError::SerializationError(e.to_string()))?;
+
+        conn.execute(
+            "INSERT INTO tool_journal (run_id, tenant_id, workspace_id, node_id, tool_call_id, tool_name, arguments_json, status, output_text, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'executing', NULL, ?8, ?9)
+             ON CONFLICT(run_id, node_id, tool_call_id) DO UPDATE SET status = 'executing', updated_at = ?9",
+            params![
+                scope.run_id.to_string(),
+                scope.tenant_id.to_string(),
+                scope.workspace_id.to_string(),
+                node_id,
+                tool_call_id,
+                tool_name,
+                args_json,
+                now,
+                now,
+            ],
+        )
+        .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_tool_call_status(
+        &self,
+        scope: &ExecutionScope,
+        node_id: &str,
+        tool_call_id: &str,
+    ) -> Result<Option<(String, Option<String>)>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT status, output_text FROM tool_journal
+                 WHERE run_id = ?1 AND node_id = ?2 AND tool_call_id = ?3 AND tenant_id = ?4 AND workspace_id = ?5",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        let mut rows = stmt
+            .query(params![
+                scope.run_id.to_string(),
+                node_id,
+                tool_call_id,
+                scope.tenant_id.to_string(),
+                scope.workspace_id.to_string(),
+            ])
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        if let Some(row) = rows
+            .next()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?
+        {
+            let status: String = row
+                .get(0)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let output: Option<String> = row
+                .get(1)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            Ok(Some((status, output)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn complete_tool_call(
+        &self,
+        scope: &ExecutionScope,
+        node_id: &str,
+        tool_call_id: &str,
+        output: &str,
+    ) -> Result<(), CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let now = Utc::now().to_rfc3339();
+
+        conn.execute(
+            "UPDATE tool_journal
+             SET status = 'consumed', output_text = ?1, updated_at = ?2
+             WHERE run_id = ?3 AND node_id = ?4 AND tool_call_id = ?5 AND tenant_id = ?6 AND workspace_id = ?7",
+            params![
+                output,
+                now,
+                scope.run_id.to_string(),
+                node_id,
+                tool_call_id,
+                scope.tenant_id.to_string(),
+                scope.workspace_id.to_string(),
+            ],
+        )
+        .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        Ok(())
     }
 }

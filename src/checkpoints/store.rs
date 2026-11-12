@@ -137,4 +137,29 @@ pub trait CheckpointStore: Send + Sync {
         approval_id: Uuid,
         executing_step: &WorkflowStepCheckpoint,
     ) -> impl std::future::Future<Output = Result<bool, CheckpointError>> + Send;
+
+    fn record_tool_call(
+        &self,
+        scope: &ExecutionScope,
+        node_id: &str,
+        tool_call_id: &str,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) -> impl std::future::Future<Output = Result<(), CheckpointError>> + Send;
+
+    fn get_tool_call_status(
+        &self,
+        scope: &ExecutionScope,
+        node_id: &str,
+        tool_call_id: &str,
+    ) -> impl std::future::Future<Output = Result<Option<(String, Option<String>)>, CheckpointError>>
+           + Send;
+
+    fn complete_tool_call(
+        &self,
+        scope: &ExecutionScope,
+        node_id: &str,
+        tool_call_id: &str,
+        output: &str,
+    ) -> impl std::future::Future<Output = Result<(), CheckpointError>> + Send;
 }

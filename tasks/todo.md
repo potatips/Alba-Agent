@@ -41,7 +41,7 @@
   - [x] S1 Validation: WorkflowSpec graph validator (acyclicity except declared loop_back, reachable End, router targets, agent resolution, explicit rejection of unsupported kinds).
   - [x] S2 Linear Crew Run: Start -> Crew (sequential) -> End with mock model, SQLite checkpoint per node, events emitted, exhaustive state enum.
   - [x] S3 Approval Gate: ApprovalGate pauses run (AwaitingApproval), CLI approve/deny, author != approver separation, fail-closed audit.
-  - [ ] S4 Resume & Crash Safety: Tool idempotency journal in SQLite, resume from checkpoint, SIGKILL recovery test.
+  - [x] S4 Resume & Crash Safety: Tool idempotency journal in SQLite, resume from checkpoint, SIGKILL recovery test.
   - [ ] S5 Router, loop_back, ParallelBranch: Router rule evaluation, max_loop_iterations enforcement, join=all and join=any.
   - [ ] S6 Hierarchical Crew: Manager agent delegates to specialist agents via spec.
   - [ ] S7 Fork & Time-Travel: fork run from checkpoint, rewind to checkpoint, hash compare.

@@ -7,3 +7,4 @@ time	phase	decision	reason	evidence	result
 2026-11-12T09:34:00Z	G2-S1	workflow-validator	Implemented WorkflowSpec validation rules (acyclicity, reachable End, router targets, crew agent validation, explicit rejection of Rag and Sandbox)	tests/validation_tests.rs (15 tests passed)	PASS
 2026-11-12T09:41:00Z	G2-S2	linear-crew-executor	Built WorkflowExecutor engine with exhaustive state enum, sequential Crew execution, SQLite step checkpoints, and events emission	tests/workflow_s2_tests.rs (1 test passed)	PASS
 2026-11-12T09:43:00Z	G2-S3	approval-gate-flow	Implemented ApprovalGate pause (AwaitingApproval), separated author-approver protocol, atomic claim, and fail-closed audit	tests/workflow_s3_tests.rs (2 tests passed)	PASS
+2026-11-12T09:45:00Z	G2-S4	tool-journal-and-crash-safety	Implemented SQLite tool journal (executing -> consumed), idempotency resume, and fail-closed crash recovery	tests/workflow_s4_tests.rs (3 tests passed)	PASS

@@ -674,43 +674,75 @@ where
             }
 
             for tc in response.tool_calls {
-                self.event_sink.emit(
-                    RuntimeEvent::new(
-                        scope,
-                        RuntimeEventType::ToolInvoked,
-                        serde_json::json!({
-                            "tool_call_id": tc.id,
-                            "tool_name": tc.name,
-                            "arguments": tc.arguments,
-                        }),
-                    )
-                    .with_node(&crew_spec.id),
-                )?;
+                let tool_status = self
+                    .checkpoint_store
+                    .get_tool_call_status(&scope, &crew_spec.id, &tc.id)
+                    .await?;
 
-                let tool = self
-                    .tool_registry
-                    .get(&tc.name)
-                    .ok_or_else(|| ToolError::NotFound(tc.name.clone()))?;
+                let result_content = match tool_status {
+                    Some((status, Some(cached_output))) if status == "consumed" => cached_output,
+                    Some((status, _)) if status == "executing" => {
+                        return Err(WorkflowExecutionError::ExecutionFailed(format!(
+                            "Tool call '{}' was interrupted mid-execution (crashed), failing closed",
+                            tc.id
+                        )));
+                    }
+                    _ => {
+                        self.checkpoint_store
+                            .record_tool_call(
+                                &scope,
+                                &crew_spec.id,
+                                &tc.id,
+                                &tc.name,
+                                &tc.arguments,
+                            )
+                            .await?;
 
-                let result = tool.execute(&scope, &tc.arguments).await?;
+                        self.event_sink.emit(
+                            RuntimeEvent::new(
+                                scope,
+                                RuntimeEventType::ToolInvoked,
+                                serde_json::json!({
+                                    "tool_call_id": tc.id,
+                                    "tool_name": tc.name,
+                                    "arguments": tc.arguments,
+                                }),
+                            )
+                            .with_node(&crew_spec.id),
+                        )?;
 
-                self.event_sink.emit(
-                    RuntimeEvent::new(
-                        scope,
-                        RuntimeEventType::ToolCompleted,
-                        serde_json::json!({
-                            "tool_call_id": tc.id,
-                            "tool_name": tc.name,
-                            "content": result.clone(),
-                            "is_error": false,
-                        }),
-                    )
-                    .with_node(&crew_spec.id),
-                )?;
+                        let tool = self
+                            .tool_registry
+                            .get(&tc.name)
+                            .ok_or_else(|| ToolError::NotFound(tc.name.clone()))?;
+
+                        let output = tool.execute(&scope, &tc.arguments).await?;
+
+                        self.checkpoint_store
+                            .complete_tool_call(&scope, &crew_spec.id, &tc.id, &output)
+                            .await?;
+
+                        self.event_sink.emit(
+                            RuntimeEvent::new(
+                                scope,
+                                RuntimeEventType::ToolCompleted,
+                                serde_json::json!({
+                                    "tool_call_id": tc.id,
+                                    "tool_name": tc.name,
+                                    "content": output.clone(),
+                                    "is_error": false,
+                                }),
+                            )
+                            .with_node(&crew_spec.id),
+                        )?;
+
+                        output
+                    }
+                };
 
                 messages.push(ChatMessage {
                     role: MessageRole::Tool,
-                    content: result,
+                    content: result_content,
                     tool_calls: None,
                     tool_call_id: Some(tc.id),
                 });

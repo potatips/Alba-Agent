@@ -240,7 +240,7 @@ fn test_full_workflow_spec_roundtrip() {
     assert_eq!(decoded.id, workflow_id);
     assert_eq!(decoded.nodes.len(), 5);
     assert_eq!(decoded.edges.len(), 5);
-    assert_eq!(decoded.edges[4].loop_back, true);
+    assert!(decoded.edges[4].loop_back);
 }
 
 #[test]

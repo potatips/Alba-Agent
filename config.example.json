@@ -1,0 +1,17 @@
+{
+  "tenant_id": "00000000-0000-0000-0000-000000000001",
+  "workspace_id": "00000000-0000-0000-0000-000000000002",
+  "actor_id": "operator@example.com",
+  "api_base": "https://api.openai.com/v1",
+  "model": "gpt-4o-mini",
+  "temperature": 0.2,
+  "max_tokens": 4096,
+  "request_timeout_seconds": 30,
+  "max_execution_turns": 10,
+  "db_path": "albaai.db",
+  "environment_variables": {
+    "NEXUS_API_KEY": "your-api-key-here",
+    "NEXUS_MODEL_BASE_URL": "https://api.openai.com/v1",
+    "NEXUS_MODEL": "gpt-4o-mini"
+  }
+}

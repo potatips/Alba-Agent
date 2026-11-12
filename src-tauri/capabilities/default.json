@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default runtime permissions for Alba Agent",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

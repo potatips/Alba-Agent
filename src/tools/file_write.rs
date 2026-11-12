@@ -10,6 +10,9 @@ use sha2::{Digest, Sha256};
 use similar::TextDiff;
 use uuid::Uuid;
 
+use crate::checkpoints::sqlite::SqliteCheckpointStore;
+use crate::checkpoints::store::CheckpointStore;
+use crate::checkpoints::types::AuditLogEntry;
 use crate::domain::ExecutionScope;
 use crate::events::sink::EventSink;
 use crate::events::types::{RuntimeEvent, RuntimeEventType};
@@ -76,6 +79,7 @@ pub fn preview_write_diff(
 pub struct WriteFileTool {
     workspace_root: PathBuf,
     event_sink: Option<Arc<dyn EventSink>>,
+    audit_store: Option<Arc<SqliteCheckpointStore>>,
 }
 
 impl WriteFileTool {
@@ -83,11 +87,17 @@ impl WriteFileTool {
         Self {
             workspace_root: workspace_root.into(),
             event_sink: None,
+            audit_store: None,
         }
     }
 
     pub fn with_event_sink(mut self, event_sink: Arc<dyn EventSink>) -> Self {
         self.event_sink = Some(event_sink);
+        self
+    }
+
+    pub fn with_audit_store(mut self, audit_store: Arc<SqliteCheckpointStore>) -> Self {
+        self.audit_store = Some(audit_store);
         self
     }
 }
@@ -149,8 +159,29 @@ impl Tool for WriteFileTool {
                 });
             }
 
-            let (_real_root, target, clean_rel) =
-                resolve_writable_file(&self.workspace_root, &args.path)?;
+            let resolve_res = resolve_writable_file(&self.workspace_root, &args.path);
+            let (_real_root, target, clean_rel) = match resolve_res {
+                Ok(tuple) => tuple,
+                Err(err) => {
+                    if let Some(ref store) = self.audit_store {
+                        let _ = store
+                            .record_audit_log(&AuditLogEntry {
+                                id: Uuid::new_v4(),
+                                scope: *scope,
+                                actor_id: None,
+                                action: "sandbox.write_blocked".to_string(),
+                                target_id: None,
+                                details: serde_json::json!({
+                                    "path": args.path,
+                                    "error": err.to_string(),
+                                }),
+                                created_at: chrono::Utc::now(),
+                            })
+                            .await;
+                    }
+                    return Err(err);
+                }
+            };
 
             if let Some(parent) = target.parent() {
                 if !parent.exists() {

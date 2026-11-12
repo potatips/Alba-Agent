@@ -1,14 +1,21 @@
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
+use uuid::Uuid;
+
+use crate::checkpoints::sqlite::SqliteCheckpointStore;
+use crate::checkpoints::store::CheckpointStore;
+use crate::checkpoints::types::AuditLogEntry;
 use crate::domain::ExecutionScope;
 use crate::tools::types::{BoxFuture, Tool, ToolDefinition, ToolError};
 
 pub const DEFAULT_MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ReadFileTool {
     workspace_root: PathBuf,
     max_bytes: usize,
+    audit_store: Option<Arc<SqliteCheckpointStore>>,
 }
 
 impl ReadFileTool {
@@ -16,11 +23,17 @@ impl ReadFileTool {
         Self {
             workspace_root: workspace_root.into(),
             max_bytes: DEFAULT_MAX_FILE_BYTES,
+            audit_store: None,
         }
     }
 
     pub fn with_max_bytes(mut self, max_bytes: usize) -> Self {
         self.max_bytes = max_bytes;
+        self
+    }
+
+    pub fn with_audit_store(mut self, audit_store: Arc<SqliteCheckpointStore>) -> Self {
+        self.audit_store = Some(audit_store);
         self
     }
 
@@ -171,7 +184,29 @@ impl Tool for ReadFileTool {
                 ToolError::InvalidArguments("Parameter 'path' must be a string".to_string())
             })?;
 
-            let resolved = self.validate_and_resolve(relative_path)?;
+            let resolve_res = self.validate_and_resolve(relative_path);
+            let resolved = match resolve_res {
+                Ok(p) => p,
+                Err(err) => {
+                    if let Some(ref store) = self.audit_store {
+                        let _ = store
+                            .record_audit_log(&AuditLogEntry {
+                                id: Uuid::new_v4(),
+                                scope: *_scope,
+                                actor_id: None,
+                                action: "sandbox.read_blocked".to_string(),
+                                target_id: None,
+                                details: serde_json::json!({
+                                    "path": relative_path,
+                                    "error": err.to_string(),
+                                }),
+                                created_at: chrono::Utc::now(),
+                            })
+                            .await;
+                    }
+                    return Err(err);
+                }
+            };
 
             let metadata = tokio::fs::metadata(&resolved)
                 .await

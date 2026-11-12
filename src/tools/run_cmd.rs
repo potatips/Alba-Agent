@@ -3,7 +3,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
+use uuid::Uuid;
 
+use crate::checkpoints::sqlite::SqliteCheckpointStore;
+use crate::checkpoints::store::CheckpointStore;
+use crate::checkpoints::types::AuditLogEntry;
 use crate::domain::ExecutionScope;
 use crate::events::sink::EventSink;
 use crate::events::types::{RuntimeEvent, RuntimeEventType};
@@ -15,6 +19,7 @@ pub struct RunCommandTool {
     workspace_root: PathBuf,
     event_sink: Option<Arc<dyn EventSink>>,
     backend: SandboxBackendKind,
+    audit_store: Option<Arc<SqliteCheckpointStore>>,
 }
 
 impl RunCommandTool {
@@ -23,6 +28,7 @@ impl RunCommandTool {
             workspace_root: workspace_root.into(),
             event_sink: None,
             backend: SandboxBackendKind::Auto,
+            audit_store: None,
         }
     }
 
@@ -33,6 +39,11 @@ impl RunCommandTool {
 
     pub fn with_backend(mut self, backend: SandboxBackendKind) -> Self {
         self.backend = backend;
+        self
+    }
+
+    pub fn with_audit_store(mut self, audit_store: Arc<SqliteCheckpointStore>) -> Self {
+        self.audit_store = Some(audit_store);
         self
     }
 }
@@ -89,6 +100,37 @@ impl Tool for RunCommandTool {
             })?;
 
             let timeout_secs = args.timeout_secs.unwrap_or(30).clamp(1, 300);
+
+            let is_network_call = args.program == "curl"
+                || args.program == "wget"
+                || args
+                    .args
+                    .iter()
+                    .any(|a| a.starts_with("http://") || a.starts_with("https://"));
+
+            if is_network_call && !args.allow_network {
+                if let Some(ref store) = self.audit_store {
+                    let _ = store
+                        .record_audit_log(&AuditLogEntry {
+                            id: Uuid::new_v4(),
+                            scope: *scope,
+                            actor_id: None,
+                            action: "sandbox.network_blocked".to_string(),
+                            target_id: None,
+                            details: serde_json::json!({
+                                "program": args.program,
+                                "args": args.args,
+                                "reason": "Network access blocked by default sandbox policy",
+                            }),
+                            created_at: chrono::Utc::now(),
+                        })
+                        .await;
+                }
+                return Err(ToolError::AccessDenied(
+                    "Outbound network access is blocked by sandbox policy".to_string(),
+                ));
+            }
+
             let policy = SandboxPolicy::new(&self.workspace_root)
                 .with_network(args.allow_network)
                 .with_timeout(Duration::from_secs(timeout_secs))

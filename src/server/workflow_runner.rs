@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::checkpoints::SqliteCheckpointStore;
 use crate::domain::ExecutionScope;
 use crate::events::sink::EventSink;
 use crate::events::types::{RuntimeEvent, RuntimeEventType};
@@ -17,17 +18,22 @@ use crate::workflow::engine::{WorkflowExecutor, WorkflowOutcome};
 
 #[derive(Clone)]
 pub struct BroadcastEventSink {
+    store: Arc<SqliteCheckpointStore>,
     tx: tokio::sync::broadcast::Sender<RuntimeEvent>,
 }
 
 impl BroadcastEventSink {
-    pub fn new(tx: tokio::sync::broadcast::Sender<RuntimeEvent>) -> Self {
-        Self { tx }
+    pub fn new(
+        store: Arc<SqliteCheckpointStore>,
+        tx: tokio::sync::broadcast::Sender<RuntimeEvent>,
+    ) -> Self {
+        Self { store, tx }
     }
 }
 
 impl EventSink for BroadcastEventSink {
     fn emit(&self, event: RuntimeEvent) -> Result<(), crate::events::EventError> {
+        let _ = self.store.insert_run_event(&event);
         let _ = self.tx.send(event);
         Ok(())
     }
@@ -92,7 +98,10 @@ pub async fn run_workflow_background(
         .store
         .update_run_status(&run_id_str, "RUNNING", None, None);
 
-    let event_sink = Arc::new(BroadcastEventSink::new(state.events_tx.clone()));
+    let event_sink = Arc::new(BroadcastEventSink::new(
+        state.store.clone(),
+        state.events_tx.clone(),
+    ));
     let start_event = RuntimeEvent {
         id: Uuid::new_v4(),
         scope,
@@ -139,7 +148,10 @@ pub async fn resume_workflow_background(
         .store
         .update_run_status(&run_id_str, "RUNNING", None, None);
 
-    let event_sink = Arc::new(BroadcastEventSink::new(state.events_tx.clone()));
+    let event_sink = Arc::new(BroadcastEventSink::new(
+        state.store.clone(),
+        state.events_tx.clone(),
+    ));
     let resume_event = RuntimeEvent {
         id: Uuid::new_v4(),
         scope,
@@ -192,40 +204,11 @@ fn handle_outcome(
                 state
                     .store
                     .update_run_status(&run_id_str, "SUCCEEDED", Some(&out_str), Some(&now));
-            let comp_event = RuntimeEvent {
-                id: Uuid::new_v4(),
-                scope,
-                node_id: None,
-                event_type: RuntimeEventType::RunCompleted,
-                occurred_at: Utc::now(),
-                payload: serde_json::json!({
-                    "run_id": run_id_str,
-                    "status": "SUCCEEDED",
-                    "output": output,
-                }),
-            };
-            let _ = event_sink.emit(comp_event);
         }
-        Ok(WorkflowOutcome::AwaitingApproval {
-            node_id,
-            approval_id,
-            action_description,
-        }) => {
+        Ok(WorkflowOutcome::AwaitingApproval { .. }) => {
             let _ = state
                 .store
                 .update_run_status(&run_id_str, "AWAITING_APPROVAL", None, None);
-            let app_event = RuntimeEvent {
-                id: Uuid::new_v4(),
-                scope,
-                node_id: Some(node_id),
-                event_type: RuntimeEventType::ApprovalRequired,
-                occurred_at: Utc::now(),
-                payload: serde_json::json!({
-                    "approval_id": approval_id.to_string(),
-                    "action": action_description,
-                }),
-            };
-            let _ = event_sink.emit(app_event);
         }
         Ok(WorkflowOutcome::Paused { node_id }) => {
             let _ = state

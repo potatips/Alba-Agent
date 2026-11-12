@@ -19,6 +19,7 @@ use crate::domain::{
     ActionIntentKind, ApprovalDecision, ApprovalRequest, ApprovalStatus, ChatMessage,
     ExecutionScope, MessageRole, RunStatus, ToolCall,
 };
+use crate::events::types::{RuntimeEvent, RuntimeEventType};
 use crate::schema::ApprovalRequestSpec;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -441,6 +442,29 @@ impl SqliteCheckpointStore {
 
                 INSERT INTO schema_migrations (version, applied_at)
                 VALUES (5, datetime('now'));
+                ",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        }
+
+        if current_version < 6 {
+            conn.execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS run_events (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id TEXT UNIQUE NOT NULL,
+                    run_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL,
+                    node_id TEXT,
+                    event_type TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_run_events_run_seq ON run_events(run_id, seq);
+
+                INSERT INTO schema_migrations (version, applied_at)
+                VALUES (6, datetime('now'));
                 ",
             )
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
@@ -926,6 +950,150 @@ impl SqliteCheckpointStore {
             }
         }
         Ok(out)
+    }
+
+    pub fn insert_run_event(&self, event: &RuntimeEvent) -> Result<(), CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let payload_json = serde_json::to_string(&event.payload)
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let id_str = event.id.to_string();
+        let run_id_str = event.scope.run_id.to_string();
+        let tenant_id_str = event.scope.tenant_id.to_string();
+        let workspace_id_str = event.scope.workspace_id.to_string();
+        let occurred_at_str = event.occurred_at.to_rfc3339();
+
+        conn.execute(
+            "INSERT OR IGNORE INTO run_events (id, run_id, tenant_id, workspace_id, node_id, event_type, occurred_at, payload_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                id_str,
+                run_id_str,
+                tenant_id_str,
+                workspace_id_str,
+                event.node_id,
+                event.event_type.as_str(),
+                occurred_at_str,
+                payload_json
+            ],
+        )
+        .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    pub fn list_run_events(
+        &self,
+        run_id: &str,
+        after_event_id: Option<&str>,
+    ) -> Result<Vec<RuntimeEvent>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        let after_seq: i64 = if let Some(after_id) = after_event_id {
+            conn.query_row(
+                "SELECT seq FROM run_events WHERE id = ?1",
+                params![after_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, run_id, tenant_id, workspace_id, node_id, event_type, occurred_at, payload_json
+                 FROM run_events
+                 WHERE run_id = ?1 AND seq > ?2
+                 ORDER BY seq ASC",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![run_id, after_seq], |row| {
+                let id_str: String = row.get(0)?;
+                let run_id_str: String = row.get(1)?;
+                let tenant_id_str: String = row.get(2)?;
+                let workspace_id_str: String = row.get(3)?;
+                let node_id: Option<String> = row.get(4)?;
+                let event_type_str: String = row.get(5)?;
+                let occurred_at_str: String = row.get(6)?;
+                let payload_json: String = row.get(7)?;
+
+                Ok((
+                    id_str,
+                    run_id_str,
+                    tenant_id_str,
+                    workspace_id_str,
+                    node_id,
+                    event_type_str,
+                    occurred_at_str,
+                    payload_json,
+                ))
+            })
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        let mut events = Vec::new();
+        for r in rows {
+            let (
+                id_str,
+                run_id_str,
+                tenant_id_str,
+                workspace_id_str,
+                node_id,
+                event_type_str,
+                occurred_at_str,
+                payload_json,
+            ) = r.map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+            let id = Uuid::from_str(&id_str)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let run_id = Uuid::from_str(&run_id_str)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let tenant_id = Uuid::from_str(&tenant_id_str)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let workspace_id = Uuid::from_str(&workspace_id_str)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let occurred_at = chrono::DateTime::parse_from_rfc3339(&occurred_at_str)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?
+                .with_timezone(&Utc);
+            let payload: serde_json::Value = serde_json::from_str(&payload_json)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+            let event_type = match event_type_str.as_str() {
+                "TOOL_INVOKED" => RuntimeEventType::ToolInvoked,
+                "TOOL_COMPLETED" => RuntimeEventType::ToolCompleted,
+                "APPROVAL_REQUIRED" => RuntimeEventType::ApprovalRequired,
+                "APPROVAL_RESOLVED" => RuntimeEventType::ApprovalResolved,
+                "FLOW_STATE_CHANGED" => RuntimeEventType::FlowStateChanged,
+                "SANDBOX_TERMINAL_OUTPUT" => RuntimeEventType::SandboxTerminalOutput,
+                "SANDBOX_FILE_DIFF" => RuntimeEventType::SandboxFileDiff,
+                "TRAJECTORY_FORKED" => RuntimeEventType::TrajectoryForked,
+                "RUN_COMPLETED" => RuntimeEventType::RunCompleted,
+                "RUN_FAILED" => RuntimeEventType::RunFailed,
+                _ => RuntimeEventType::FlowStateChanged,
+            };
+
+            events.push(RuntimeEvent {
+                id,
+                scope: ExecutionScope {
+                    tenant_id,
+                    workspace_id,
+                    run_id,
+                },
+                node_id,
+                event_type,
+                occurred_at,
+                payload,
+            });
+        }
+
+        Ok(events)
     }
 }
 

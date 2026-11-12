@@ -12,6 +12,7 @@ use crate::server::error::fallback_404;
 use crate::server::routes::auth::{local_mode_handler, local_session_handler, me_handler};
 use crate::server::routes::health::health_handler;
 use crate::server::routes::runs::{get_run_handler, list_runs_handler};
+use crate::server::routes::sse::stream_run;
 use crate::server::routes::workflows::{
     create_workflow_handler, create_workflow_run_handler, get_workflow_handler,
     list_workflows_handler, update_workflow_handler,
@@ -38,6 +39,7 @@ pub fn create_app(state: AppState) -> Router {
         )
         .route("/api/v1/runs", get(list_runs_handler))
         .route("/api/v1/runs/{id}", get(get_run_handler))
+        .route("/api/v1/runs/{id}/stream", get(stream_run))
         .fallback(fallback_404)
         .layer(CorsLayer::permissive())
         .with_state(state)

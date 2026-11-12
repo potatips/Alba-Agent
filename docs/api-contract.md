@@ -221,7 +221,7 @@ The frontend is the unmodified `NexusAgent/apps/web` (Next.js 15, Tailwind v3).
 
 ### 11. `GET /api/v1/runs/:id/stream` (SSE)
 - **Purpose**: Real-time event stream (`text/event-stream`) streaming node progress, tool execution logs, and state checkpoints.
-- **Headers**: `Authorization: Bearer <token>`, `Accept: text/event-stream`
+- **Headers**: `Authorization: Bearer <token>`, `Accept: text/event-stream`, `Last-Event-ID: <event-id>` (optional)
 - **Response**: `200 OK` with chunked SSE messages.
   ```text
   event: node_started
@@ -233,6 +233,14 @@ The frontend is the unmodified `NexusAgent/apps/web` (Next.js 15, Tailwind v3).
   event: run_completed
   data: {"run_id": "run-01934e8f", "status": "SUCCEEDED"}
   ```
+- **Reconnection & Last-Event-ID**:
+  - Clients can reconnect after network interruption by providing `Last-Event-ID: <id>`.
+  - The server queries `run_events` for all events strictly after the specified event sequence, emits them in order, and then seamlessly attaches to live events from the in-process broadcast channel.
+- **Backpressure & Task Cleanup Policy**:
+  - Broadcast channel buffer is fixed at 1,024 events. If a slow client lags behind the broadcast channel, `RecvError::Lagged` triggers an immediate catch-up query from durable SQLite `run_events` log, guaranteeing zero event loss.
+  - Flow control applies naturally via HTTP chunked transfer and TCP socket backpressure.
+  - Client disconnection terminates the async stream generator immediately, dropping the broadcast receiver with no leaked tasks or resources.
+  - Heartbeats (`: keep-alive\n\n`) are sent every 15 seconds during inactive intervals.
 
 ### 12. `POST /api/v1/runs/:id/cancel`
 - **Purpose**: Cancels an active or paused run execution.

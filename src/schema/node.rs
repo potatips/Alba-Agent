@@ -206,15 +206,39 @@ fn default_top_k() -> u32 {
     5
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndNodeSpec {
+    pub id: String,
+    #[serde(default = "default_end_label")]
+    pub label: String,
+}
+
+fn default_end_label() -> String {
+    "End".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParallelBranchNodeSpec {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub branch_nodes: Vec<String>,
+    #[serde(default)]
+    pub join: JoinMode,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WorkflowNode {
     Start(StartNodeSpec),
     Crew(CrewNodeSpec),
     Sandbox(Box<NexusGenSandboxNodeSpec>),
+    #[serde(alias = "approval_gate")]
     Approval(ApprovalGateNodeSpec),
     Router(RouterNodeSpec),
     Rag(RAGNodeSpec),
+    End(EndNodeSpec),
+    ParallelBranch(ParallelBranchNodeSpec),
 }
 
 impl WorkflowNode {
@@ -226,6 +250,8 @@ impl WorkflowNode {
             Self::Approval(n) => &n.id,
             Self::Router(n) => &n.id,
             Self::Rag(n) => &n.id,
+            Self::End(n) => &n.id,
+            Self::ParallelBranch(n) => &n.id,
         }
     }
 }

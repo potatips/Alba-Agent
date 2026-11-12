@@ -9,8 +9,9 @@ pub use agent::{AgentSpec, AgentTier};
 pub use approval::ApprovalRequestSpec;
 pub use capsule::KnowledgeCapsuleSpec;
 pub use node::{
-    ApprovalGateNodeSpec, ConsensusConfigSpec, CrewNodeSpec, CrewProcess, JoinMode,
-    NexusGenSandboxNodeSpec, RAGNodeSpec, RouteSpec, RouterNodeSpec, StartNodeSpec, WorkflowNode,
+    ApprovalGateNodeSpec, ConsensusConfigSpec, CrewNodeSpec, CrewProcess, EndNodeSpec, JoinMode,
+    NexusGenSandboxNodeSpec, ParallelBranchNodeSpec, RAGNodeSpec, RouteSpec, RouterNodeSpec,
+    StartNodeSpec, WorkflowNode,
 };
 pub use task::TaskSpec;
 pub use workflow::{

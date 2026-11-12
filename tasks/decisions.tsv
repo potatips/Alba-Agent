@@ -4,3 +4,4 @@ time	phase	decision	reason	evidence	result
 2026-11-12T08:33:35Z	G1	api-contract-and-types	Defined minimal v1 contract, generated Rust Serde types from core-schema, and designed SQLite WAL schema	docs/api-contract.md, tests/schema_contract_tests.rs	PASS
 2026-11-12T09:09:00Z	G0-G1-fix	review-findings-addressed	Resolved findings F1-F5: measured default RAM, parsed 32 startup logs, fixed clippy bool assert, full 63-endpoint census & 24 detailed specs, clean commit history	tasks/baseline.md, docs/api-contract.md, git log	PASS
 2026-11-12T09:27:00Z	G2-step0	baseline-proxy-relabel	Relabeled idle RAM default desktop to proxy measurement with explicit component accounting	tasks/baseline.md, tasks/lessons.md	PASS
+2026-11-12T09:34:00Z	G2-S1	workflow-validator	Implemented WorkflowSpec validation rules (acyclicity, reachable End, router targets, crew agent validation, explicit rejection of Rag and Sandbox)	tests/validation_tests.rs (15 tests passed)	PASS

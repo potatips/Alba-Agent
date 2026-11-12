@@ -38,6 +38,14 @@
 - [x] G0 Baseline: Measure NexusAgent (install size, idle RAM, startup time, sample run time); run pnpm lint/check/test + pytest. Record in `tasks/baseline.md`.
 - [x] G1 Contract: Catalog `/api/v1` endpoints used by `apps/web`; define minimal v1 contract; generate Rust Serde types from core-schema; design SQLite WAL schema.
 - [ ] G2 Rust Engine: WorkflowSpec executor in Alba (Crew sequential/hierarchical, ApprovalGate, Router, loop_back, ParallelBranch).
+  - [x] S1 Validation: WorkflowSpec graph validator (acyclicity except declared loop_back, reachable End, router targets, agent resolution, explicit rejection of unsupported kinds).
+  - [ ] S2 Linear Crew Run: Start -> Crew (sequential) -> End with mock model, SQLite checkpoint per node, events emitted, exhaustive state enum.
+  - [ ] S3 Approval Gate: ApprovalGate pauses run (AwaitingApproval), CLI approve/deny, author != approver separation, fail-closed audit.
+  - [ ] S4 Resume & Crash Safety: Tool idempotency journal in SQLite, resume from checkpoint, SIGKILL recovery test.
+  - [ ] S5 Router, loop_back, ParallelBranch: Router rule evaluation, max_loop_iterations enforcement, join=all and join=any.
+  - [ ] S6 Hierarchical Crew: Manager agent delegates to specialist agents via spec.
+  - [ ] S7 Fork & Time-Travel: fork run from checkpoint, rewind to checkpoint, hash compare.
+  - [ ] S8 CLI & Sample Workflow: CLI commands and 3-agent approval sample, end-to-end scenario automated in cargo test.
 - [ ] G3 Compatible API: axum serves `/api/v1` + SSE; apps/web completes one run end-to-end.
 - [ ] G4 Verification & Hooks: Validator, claims, evidence, Deny/Ask/Allow policy.
 - [ ] G5 Memory: Checkpoints + capsules (scope firewall) + embedded vectors + conversation compaction.

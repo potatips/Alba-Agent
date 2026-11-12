@@ -19,7 +19,7 @@ use crate::governance::policy::ApprovalPolicy;
 use crate::models::adapter::ModelClient;
 use crate::models::types::{ModelError, ModelRequest};
 use crate::schema::{
-    ApprovalGateNodeSpec, CrewNodeSpec, CrewProcess, EndNodeSpec, ParallelBranchNodeSpec,
+    ApprovalGateNodeSpec, CrewNodeSpec, CrewProcess, EndNodeSpec, JoinMode, ParallelBranchNodeSpec,
     RouterNodeSpec, StartNodeSpec, TaskSpec, WorkflowNode, WorkflowSpec,
 };
 use crate::tools::types::{ToolError, ToolRegistry};
@@ -547,10 +547,19 @@ where
                 .with_node(&crew_spec.id),
             )?;
         } else {
-            return Err(WorkflowExecutionError::ExecutionFailed(format!(
-                "Crew node '{}' has no outgoing edges",
-                crew_spec.id
-            )));
+            let is_branch_child = spec.nodes.iter().any(|n| {
+                if let WorkflowNode::ParallelBranch(pb) = n {
+                    pb.branch_nodes.contains(&crew_spec.id)
+                } else {
+                    false
+                }
+            });
+            if !is_branch_child {
+                return Err(WorkflowExecutionError::ExecutionFailed(format!(
+                    "Crew node '{}' has no outgoing edges",
+                    crew_spec.id
+                )));
+            }
         }
 
         Ok(())
@@ -816,15 +825,21 @@ where
         let mut selected_edge = None;
 
         for route in &router_spec.routes {
-            let matches = if let Some(expected) = &route.value {
-                let actual = context
-                    .task_outputs
-                    .get(&route.field_path)
-                    .map(|s| Value::String(s.clone()))
-                    .or_else(|| context.node_outputs.get(&route.field_path).cloned());
-                actual.as_ref() == Some(expected)
-            } else {
-                false
+            let actual = context
+                .task_outputs
+                .get(&route.field_path)
+                .map(|s| Value::String(s.clone()))
+                .or_else(|| context.node_outputs.get(&route.field_path).cloned());
+
+            let op = route.operator.to_lowercase();
+            let matches = match (op.as_str(), &route.value, actual) {
+                ("equals" | "eq", Some(expected), Some(actual_val)) => &actual_val == expected,
+                ("contains", Some(Value::String(substr)), Some(Value::String(full))) => {
+                    full.contains(substr)
+                }
+                ("is_empty", _, Some(Value::String(s))) => s.is_empty(),
+                ("is_not_empty", _, Some(Value::String(s))) => !s.is_empty(),
+                _ => false,
             };
 
             if matches {
@@ -866,6 +881,8 @@ where
             *count += 1;
             if *count > router_spec.max_loop_iterations {
                 context.run_state = WorkflowRunState::Failed;
+                context.sequence += 1;
+                context.updated_at = Utc::now();
                 context.error = Some(format!(
                     "Loop limit exceeded for router '{}' ({})",
                     router_spec.id, router_spec.max_loop_iterations
@@ -904,6 +921,9 @@ where
         context.updated_at = Utc::now();
         self.save_checkpoint_step(scope, context).await?;
 
+        let mut child_errors = Vec::new();
+        let mut child_successes = 0;
+
         for branch_node_id in &branch_spec.branch_nodes {
             let child_node = spec
                 .nodes
@@ -913,13 +933,29 @@ where
 
             match child_node {
                 WorkflowNode::Crew(c) => {
-                    self.execute_crew_node(spec, scope, context, c).await?;
+                    match self.execute_crew_node(spec, scope, context, c).await {
+                        Ok(()) => child_successes += 1,
+                        Err(e) => child_errors.push(e),
+                    }
                 }
                 _ => {
                     return Err(WorkflowExecutionError::ExecutionFailed(format!(
                         "Unsupported parallel branch child node '{}'",
                         branch_node_id
                     )));
+                }
+            }
+        }
+
+        match branch_spec.join {
+            JoinMode::All => {
+                if let Some(err) = child_errors.into_iter().next() {
+                    return Err(err);
+                }
+            }
+            JoinMode::Any => {
+                if child_successes == 0 && !child_errors.is_empty() {
+                    return Err(child_errors.into_iter().next().unwrap());
                 }
             }
         }

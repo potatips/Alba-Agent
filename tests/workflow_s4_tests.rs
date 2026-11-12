@@ -205,12 +205,28 @@ async fn test_tool_journal_idempotency_avoids_reexecution() {
     let spec = create_tool_crew_spec();
     let scope = ExecutionScope::new(spec.tenant_id, spec.workspace_id, Uuid::new_v4()).unwrap();
 
+    store
+        .record_tool_call(
+            &scope,
+            "crew_tool",
+            "call_abc_123",
+            "counting_tool",
+            &serde_json::json!({ "param": "test" }),
+        )
+        .await
+        .unwrap();
+
+    store
+        .complete_tool_call(&scope, "crew_tool", "call_abc_123", "counted_ok")
+        .await
+        .unwrap();
+
     let outcome = executor
         .start_workflow(&spec, scope, None)
         .await
         .expect("First run must succeed");
 
-    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    assert_eq!(call_count.load(Ordering::SeqCst), 0);
     match outcome {
         WorkflowOutcome::Completed(val) => {
             assert_eq!(val["task_tool"], "Final answer after tool");
@@ -291,9 +307,9 @@ async fn test_tool_interrupted_executing_fails_closed_on_resume() {
 }
 
 #[tokio::test]
-async fn test_sqlite_wal_integrity_after_sigkill_simulation() {
+async fn test_sqlite_wal_integrity_after_clean_close() {
     let db_dir = tempdir().unwrap();
-    let db_path = db_dir.path().join("sigkill_test.db");
+    let db_path = db_dir.path().join("clean_close_test.db");
 
     {
         let store = SqliteCheckpointStore::new(&db_path).unwrap();

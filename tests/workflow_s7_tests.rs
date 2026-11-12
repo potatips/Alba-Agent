@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use nexus_albaai::checkpoints::sqlite::SqliteCheckpointStore;
-use nexus_albaai::checkpoints::store::CheckpointStore;
+use nexus_albaai::checkpoints::store::{CheckpointError, CheckpointStore};
 use nexus_albaai::domain::{ApprovalDecision, ExecutionScope};
 use nexus_albaai::events::sink::InMemoryEventSink;
 use nexus_albaai::governance::policy::DefaultApprovalPolicy;
@@ -270,4 +270,80 @@ async fn test_workflow_fork_preserves_parent_immutability_and_diverges() {
     assert_eq!(branches[0].forked_run_id, forked_scope.run_id);
     assert_eq!(branches[0].fork_sequence, 3);
     assert_eq!(branches[0].branch_label, "experiment_branch");
+}
+
+#[tokio::test]
+async fn test_fork_non_existent_sequence_fails() {
+    let model = Arc::new(S7MockModelClient::new(vec![]));
+    let db_dir = tempdir().unwrap();
+    let db_path = db_dir.path().join("fork_invalid_seq.db");
+    let store = Arc::new(SqliteCheckpointStore::new(&db_path).unwrap());
+    let events = Arc::new(InMemoryEventSink::new());
+    let policy = Arc::new(DefaultApprovalPolicy::new());
+    let registry = ToolRegistry::new();
+    let ws_dir = tempdir().unwrap();
+
+    let executor = WorkflowExecutor::new(
+        model,
+        store.clone(),
+        events,
+        policy,
+        registry,
+        ws_dir.path(),
+    );
+
+    let spec = create_fork_workflow_spec();
+    let scope = ExecutionScope::new(spec.tenant_id, spec.workspace_id, Uuid::new_v4()).unwrap();
+
+    executor.start_workflow(&spec, scope, None).await.unwrap();
+
+    let err = executor
+        .fork_workflow(&scope, 999, "bad_branch")
+        .await
+        .unwrap_err();
+    match err {
+        nexus_albaai::workflow::engine::WorkflowExecutionError::Checkpoint(
+            CheckpointError::NotFound(msg),
+        ) => {
+            assert!(msg.contains("not found"));
+        }
+        _ => panic!("Expected CheckpointError::NotFound, got {:?}", err),
+    }
+}
+
+#[tokio::test]
+async fn test_fork_non_existent_run_fails() {
+    let model = Arc::new(S7MockModelClient::new(vec![]));
+    let db_dir = tempdir().unwrap();
+    let db_path = db_dir.path().join("fork_invalid_run.db");
+    let store = Arc::new(SqliteCheckpointStore::new(&db_path).unwrap());
+    let events = Arc::new(InMemoryEventSink::new());
+    let policy = Arc::new(DefaultApprovalPolicy::new());
+    let registry = ToolRegistry::new();
+    let ws_dir = tempdir().unwrap();
+
+    let executor = WorkflowExecutor::new(
+        model,
+        store.clone(),
+        events,
+        policy,
+        registry,
+        ws_dir.path(),
+    );
+
+    let missing_scope =
+        ExecutionScope::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()).unwrap();
+
+    let err = executor
+        .fork_workflow(&missing_scope, 1, "bad_branch")
+        .await
+        .unwrap_err();
+    match &err {
+        nexus_albaai::workflow::engine::WorkflowExecutionError::Checkpoint(
+            CheckpointError::NotFound(msg),
+        ) => {
+            assert!(msg.contains("No checkpoints found") || msg.contains("not found"));
+        }
+        _ => panic!("Expected CheckpointError::NotFound, got {:?}", err),
+    }
 }

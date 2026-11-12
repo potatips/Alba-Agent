@@ -1,9 +1,13 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
+use chrono::Utc;
 use nexus_albaai::checkpoints::sqlite::SqliteCheckpointStore;
 use nexus_albaai::checkpoints::store::{CheckpointError, CheckpointStore};
-use nexus_albaai::domain::{ApprovalDecision, ApprovalStatus, ExecutionScope};
+use nexus_albaai::checkpoints::types::WorkflowStepCheckpoint;
+use nexus_albaai::domain::{
+    ActionIntentKind, ApprovalDecision, ApprovalRequest, ApprovalStatus, ExecutionScope, RunStatus,
+};
 use nexus_albaai::events::sink::InMemoryEventSink;
 use nexus_albaai::governance::policy::DefaultApprovalPolicy;
 use nexus_albaai::models::adapter::ModelClient;
@@ -323,4 +327,256 @@ async fn test_approval_gate_deny() {
         .unwrap()
         .expect("Latest step must exist");
     assert_eq!(latest_step.status, nexus_albaai::domain::RunStatus::Failed);
+}
+
+#[tokio::test]
+async fn test_approval_gate_double_approve_rejected() {
+    let db_dir = tempdir().unwrap();
+    let db_path = db_dir.path().join("double_approve.db");
+    let store = SqliteCheckpointStore::new(&db_path).unwrap();
+
+    let scope = ExecutionScope::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()).unwrap();
+    let approval_id = Uuid::new_v4();
+
+    let request = ApprovalRequest {
+        id: approval_id,
+        scope,
+        tool_name: "deploy_tool".to_string(),
+        action_description: "Deploy to production".to_string(),
+        intent: ActionIntentKind::DestructiveCommand,
+        status: ApprovalStatus::Pending,
+        author_id: Some("author_alice".to_string()),
+        created_at: Utc::now(),
+        decided_at: None,
+        decided_by: None,
+        consumed_at: None,
+    };
+
+    store.save_approval(&request).await.unwrap();
+
+    store
+        .resolve_approval(
+            &scope,
+            approval_id,
+            ApprovalDecision::AllowOnce,
+            "approver_bob",
+        )
+        .await
+        .expect("First approval must succeed");
+
+    let second_err = store
+        .resolve_approval(
+            &scope,
+            approval_id,
+            ApprovalDecision::AllowOnce,
+            "approver_carol",
+        )
+        .await
+        .unwrap_err();
+
+    match second_err {
+        CheckpointError::InvalidState(msg) => {
+            assert!(msg.contains("already decided"));
+        }
+        _ => panic!("Expected InvalidState error, got {:?}", second_err),
+    }
+
+    let logs = store.list_audit_logs(&scope).await.unwrap();
+    let rejected_log = logs
+        .iter()
+        .find(|l| l.action == "approval.already_decided_rejected")
+        .expect("Audit log must contain approval.already_decided_rejected");
+
+    assert_eq!(rejected_log.actor_id.as_deref(), Some("approver_carol"));
+    assert_eq!(rejected_log.target_id, Some(approval_id));
+}
+
+#[tokio::test]
+async fn test_approval_gate_already_decided_deny_rejected() {
+    let db_dir = tempdir().unwrap();
+    let db_path = db_dir.path().join("already_decided_deny.db");
+    let store = SqliteCheckpointStore::new(&db_path).unwrap();
+
+    let scope = ExecutionScope::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()).unwrap();
+    let approval_id_1 = Uuid::new_v4();
+
+    let req_1 = ApprovalRequest {
+        id: approval_id_1,
+        scope,
+        tool_name: "deploy_tool".to_string(),
+        action_description: "Deploy to production".to_string(),
+        intent: ActionIntentKind::DestructiveCommand,
+        status: ApprovalStatus::Pending,
+        author_id: Some("author_alice".to_string()),
+        created_at: Utc::now(),
+        decided_at: None,
+        decided_by: None,
+        consumed_at: None,
+    };
+    store.save_approval(&req_1).await.unwrap();
+
+    store
+        .resolve_approval(
+            &scope,
+            approval_id_1,
+            ApprovalDecision::AllowOnce,
+            "approver_bob",
+        )
+        .await
+        .unwrap();
+
+    let deny_err = store
+        .resolve_approval(
+            &scope,
+            approval_id_1,
+            ApprovalDecision::Deny,
+            "approver_carol",
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(deny_err, CheckpointError::InvalidState(_)));
+
+    let approval_id_2 = Uuid::new_v4();
+    let req_2 = ApprovalRequest {
+        id: approval_id_2,
+        scope,
+        tool_name: "deploy_tool".to_string(),
+        action_description: "Deploy to production".to_string(),
+        intent: ActionIntentKind::DestructiveCommand,
+        status: ApprovalStatus::Pending,
+        author_id: Some("author_alice".to_string()),
+        created_at: Utc::now(),
+        decided_at: None,
+        decided_by: None,
+        consumed_at: None,
+    };
+    store.save_approval(&req_2).await.unwrap();
+
+    store
+        .resolve_approval(
+            &scope,
+            approval_id_2,
+            ApprovalDecision::Deny,
+            "approver_bob",
+        )
+        .await
+        .unwrap();
+
+    let approve_after_deny = store
+        .resolve_approval(
+            &scope,
+            approval_id_2,
+            ApprovalDecision::AllowOnce,
+            "approver_carol",
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        approve_after_deny,
+        CheckpointError::InvalidState(_)
+    ));
+
+    let deny_after_deny = store
+        .resolve_approval(
+            &scope,
+            approval_id_2,
+            ApprovalDecision::Deny,
+            "approver_carol",
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(deny_after_deny, CheckpointError::InvalidState(_)));
+}
+
+#[tokio::test]
+async fn test_approval_gate_double_consume_rejected() {
+    let db_dir = tempdir().unwrap();
+    let db_path = db_dir.path().join("double_consume.db");
+    let store = SqliteCheckpointStore::new(&db_path).unwrap();
+
+    let scope = ExecutionScope::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()).unwrap();
+    let approval_id = Uuid::new_v4();
+
+    let request = ApprovalRequest {
+        id: approval_id,
+        scope,
+        tool_name: "deploy_tool".to_string(),
+        action_description: "Deploy to production".to_string(),
+        intent: ActionIntentKind::DestructiveCommand,
+        status: ApprovalStatus::Pending,
+        author_id: Some("author_alice".to_string()),
+        created_at: Utc::now(),
+        decided_at: None,
+        decided_by: None,
+        consumed_at: None,
+    };
+
+    store.save_approval(&request).await.unwrap();
+
+    store
+        .resolve_approval(
+            &scope,
+            approval_id,
+            ApprovalDecision::AllowOnce,
+            "approver_bob",
+        )
+        .await
+        .unwrap();
+
+    let first_consume = store.consume_approval(&scope, approval_id).await.unwrap();
+    assert!(first_consume);
+
+    let second_consume = store.consume_approval(&scope, approval_id).await.unwrap();
+    assert!(!second_consume);
+
+    let approval_id_2 = Uuid::new_v4();
+    let req_2 = ApprovalRequest {
+        id: approval_id_2,
+        scope,
+        tool_name: "deploy_tool".to_string(),
+        action_description: "Deploy to production".to_string(),
+        intent: ActionIntentKind::DestructiveCommand,
+        status: ApprovalStatus::Pending,
+        author_id: Some("author_alice".to_string()),
+        created_at: Utc::now(),
+        decided_at: None,
+        decided_by: None,
+        consumed_at: None,
+    };
+
+    store.save_approval(&req_2).await.unwrap();
+
+    store
+        .resolve_approval(
+            &scope,
+            approval_id_2,
+            ApprovalDecision::AllowOnce,
+            "approver_bob",
+        )
+        .await
+        .unwrap();
+
+    let executing_step = WorkflowStepCheckpoint {
+        id: Uuid::new_v4(),
+        scope,
+        sequence: 1,
+        node_id: "gate".to_string(),
+        status: RunStatus::Executing,
+        state_json: serde_json::json!({ "step": 1 }),
+        pending_approval_id: Some(approval_id_2),
+        created_at: Utc::now(),
+    };
+
+    let first_claim = store
+        .claim_workflow_approval(&scope, approval_id_2, &executing_step)
+        .await
+        .unwrap();
+    assert!(first_claim);
+
+    let second_claim = store
+        .claim_workflow_approval(&scope, approval_id_2, &executing_step)
+        .await
+        .unwrap();
+    assert!(!second_claim);
 }

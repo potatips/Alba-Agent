@@ -751,6 +751,14 @@ where
                             )
                             .await?;
 
+                        #[cfg(feature = "failpoints")]
+                        if let Ok(fp) = std::env::var("ALBA_FAILPOINT") {
+                            if fp == "tool_after_executing_before_complete" {
+                                eprintln!("FAILPOINT:tool_after_executing_before_complete");
+                                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                            }
+                        }
+
                         self.event_sink.emit(
                             RuntimeEvent::new(
                                 scope,
@@ -774,6 +782,14 @@ where
                         self.checkpoint_store
                             .complete_tool_call(&scope, &crew_spec.id, &tc.id, &output)
                             .await?;
+
+                        #[cfg(feature = "failpoints")]
+                        if let Ok(fp) = std::env::var("ALBA_FAILPOINT") {
+                            if fp == "tool_after_consumed_before_checkpoint" {
+                                eprintln!("FAILPOINT:tool_after_consumed_before_checkpoint");
+                                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                            }
+                        }
 
                         self.event_sink.emit(
                             RuntimeEvent::new(

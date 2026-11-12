@@ -1,9 +1,7 @@
 use std::path::PathBuf;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-use nexus_albaai::checkpoints::sqlite::SqliteCheckpointStore;
-use nexus_albaai::checkpoints::store::CheckpointStore;
-use nexus_albaai::domain::ExecutionScope;
 use tempfile::tempdir;
 use uuid::Uuid;
 
@@ -438,36 +436,173 @@ async fn test_three_agent_workflow_e2e_cli_and_sqlite_verifications() {
 }
 
 #[tokio::test]
-async fn test_sigkill_flakiness_20_iterations() {
+async fn test_resume_completed_workflow_run_returns_completed_without_rerun() {
+    let bin_path = env!("CARGO_BIN_EXE_nexus-albaai");
+    let server = TestHttpServer::start().await;
+    server.enqueue_response(MockResponse::final_answer("Completed once."));
+
+    let ws_dir = tempdir().unwrap();
+    let db_dir = tempdir().unwrap();
+    let db_path = db_dir.path().join("completed_run.db");
+    let workflow_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/workflows/tool_crash_workflow.json");
+    let run_id = Uuid::new_v4().to_string();
+
+    let run_out = Command::new(bin_path)
+        .env("NEXUS_API_KEY", "cli_test_key")
+        .env("NEXUS_ACTOR_ID", "author_alice")
+        .args([
+            "run",
+            "--workflow",
+            workflow_path.to_str().unwrap(),
+            "--run-id",
+            &run_id,
+            "--workspace-root",
+            ws_dir.path().to_str().unwrap(),
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "--api-base",
+            &server.url(),
+            "--model",
+            "gpt-4o",
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert!(run_out.status.success());
+
+    let reqs_after_run = server.received_requests().len();
+
+    let resume_out = Command::new(bin_path)
+        .env("NEXUS_API_KEY", "cli_test_key")
+        .env("NEXUS_ACTOR_ID", "author_alice")
+        .args([
+            "resume",
+            "--workflow",
+            workflow_path.to_str().unwrap(),
+            "--run-id",
+            &run_id,
+            "--workspace-root",
+            ws_dir.path().to_str().unwrap(),
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "--api-base",
+            &server.url(),
+            "--model",
+            "gpt-4o",
+        ])
+        .output()
+        .await
+        .unwrap();
+
+    assert!(resume_out.status.success());
+    let resume_stdout = String::from_utf8_lossy(&resume_out.stdout);
+    assert!(resume_stdout.contains("Workflow run resumed and completed successfully"));
+
+    let reqs_after_resume = server.received_requests().len();
+    assert_eq!(reqs_after_resume, reqs_after_run);
+}
+
+#[tokio::test]
+async fn test_sigkill_crash_while_executing_fails_closed_20_iterations() {
+    let bin_path = env!("CARGO_BIN_EXE_nexus-albaai");
+    let workflow_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/workflows/tool_crash_workflow.json");
+
     let mut pass_count = 0;
     for iteration in 0..20 {
+        let server = TestHttpServer::start().await;
+        server.enqueue_response(MockResponse::tool_call(
+            &format!("call_exec_{}", iteration),
+            "write_file",
+            serde_json::json!({
+                "path": "marker.txt",
+                "content": "hello_world\n"
+            }),
+        ));
+
+        let ws_dir = tempdir().unwrap();
         let db_dir = tempdir().unwrap();
-        let db_path = db_dir.path().join(format!("flakiness_{}.db", iteration));
+        let db_path = db_dir.path().join(format!("crash_exec_{}.db", iteration));
+        let run_id = Uuid::new_v4().to_string();
 
-        let scope = ExecutionScope::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()).unwrap();
+        let mut child = Command::new(bin_path)
+            .env("NEXUS_API_KEY", "cli_test_key")
+            .env("NEXUS_ACTOR_ID", "author_alice")
+            .env("ALBA_FAILPOINT", "tool_after_executing_before_complete")
+            .args([
+                "run",
+                "--workflow",
+                workflow_path.to_str().unwrap(),
+                "--run-id",
+                &run_id,
+                "--workspace-root",
+                ws_dir.path().to_str().unwrap(),
+                "--db-path",
+                db_path.to_str().unwrap(),
+                "--api-base",
+                &server.url(),
+                "--model",
+                "gpt-4o",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
 
-        {
-            let store = SqliteCheckpointStore::new(&db_path).unwrap();
-            store
-                .record_tool_call(
-                    &scope,
-                    "node_research",
-                    &format!("call_{}", iteration),
-                    "system_telemetry",
-                    &serde_json::json!({ "iteration": iteration }),
-                )
-                .await
-                .unwrap();
-            store
-                .complete_tool_call(
-                    &scope,
-                    "node_research",
-                    &format!("call_{}", iteration),
-                    &format!("result_{}", iteration),
-                )
-                .await
-                .unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let mut reader = BufReader::new(stderr).lines();
+        let mut reached_failpoint = false;
+        while let Ok(Some(line)) = reader.next_line().await {
+            if line.contains("FAILPOINT:tool_after_executing_before_complete") {
+                reached_failpoint = true;
+                break;
+            }
         }
+        assert!(reached_failpoint);
+
+        child.kill().await.unwrap();
+        let _ = child.wait().await;
+
+        let marker_path = ws_dir.path().join("marker.txt");
+        assert!(!marker_path.exists());
+
+        server.enqueue_response(MockResponse::tool_call(
+            &format!("call_exec_{}", iteration),
+            "write_file",
+            serde_json::json!({
+                "path": "marker.txt",
+                "content": "hello_world\n"
+            }),
+        ));
+
+        let resume_out = Command::new(bin_path)
+            .env("NEXUS_API_KEY", "cli_test_key")
+            .env("NEXUS_ACTOR_ID", "author_alice")
+            .args([
+                "resume",
+                "--workflow",
+                workflow_path.to_str().unwrap(),
+                "--run-id",
+                &run_id,
+                "--workspace-root",
+                ws_dir.path().to_str().unwrap(),
+                "--db-path",
+                db_path.to_str().unwrap(),
+                "--api-base",
+                &server.url(),
+                "--model",
+                "gpt-4o",
+            ])
+            .output()
+            .await
+            .unwrap();
+
+        assert!(!resume_out.status.success());
+        let resume_err = String::from_utf8_lossy(&resume_out.stderr);
+        assert!(resume_err.contains("was interrupted mid-execution (crashed), failing closed"));
+
+        assert!(!marker_path.exists());
 
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         let integrity: String = conn
@@ -475,22 +610,146 @@ async fn test_sigkill_flakiness_20_iterations() {
             .unwrap();
         assert_eq!(integrity, "ok");
 
-        let journal_mode: String = conn
-            .query_row("PRAGMA journal_mode;", [], |r| r.get(0))
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tool_journal WHERE run_id = ?1",
+                [&run_id],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(journal_mode.to_lowercase(), "wal");
+        assert_eq!(status, "executing");
 
-        let reopened_store = SqliteCheckpointStore::new(&db_path).unwrap();
-        let journal_entry = reopened_store
-            .get_tool_call_status(&scope, "node_research", &format!("call_{}", iteration))
+        pass_count += 1;
+    }
+    assert_eq!(pass_count, 20);
+}
+
+#[tokio::test]
+async fn test_sigkill_crash_after_consumed_resumes_without_rerunning_20_iterations() {
+    let bin_path = env!("CARGO_BIN_EXE_nexus-albaai");
+    let workflow_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/workflows/tool_crash_workflow.json");
+
+    let mut pass_count = 0;
+    for iteration in 0..20 {
+        let server = TestHttpServer::start().await;
+        server.enqueue_response(MockResponse::tool_call(
+            &format!("call_cons_{}", iteration),
+            "write_file",
+            serde_json::json!({
+                "path": "marker.txt",
+                "content": "hello_world\n"
+            }),
+        ));
+        server.enqueue_response(MockResponse::final_answer("Completed initial run"));
+
+        let ws_dir = tempdir().unwrap();
+        let db_dir = tempdir().unwrap();
+        let db_path = db_dir.path().join(format!("crash_cons_{}.db", iteration));
+        let run_id = Uuid::new_v4().to_string();
+
+        let mut child = Command::new(bin_path)
+            .env("NEXUS_API_KEY", "cli_test_key")
+            .env("NEXUS_ACTOR_ID", "author_alice")
+            .env("ALBA_FAILPOINT", "tool_after_consumed_before_checkpoint")
+            .args([
+                "run",
+                "--workflow",
+                workflow_path.to_str().unwrap(),
+                "--run-id",
+                &run_id,
+                "--workspace-root",
+                ws_dir.path().to_str().unwrap(),
+                "--db-path",
+                db_path.to_str().unwrap(),
+                "--api-base",
+                &server.url(),
+                "--model",
+                "gpt-4o",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let stderr = child.stderr.take().unwrap();
+        let mut reader = BufReader::new(stderr).lines();
+        let mut reached_failpoint = false;
+        while let Ok(Some(line)) = reader.next_line().await {
+            if line.contains("FAILPOINT:tool_after_consumed_before_checkpoint") {
+                reached_failpoint = true;
+                break;
+            }
+        }
+        assert!(reached_failpoint);
+
+        child.kill().await.unwrap();
+        let _ = child.wait().await;
+
+        let marker_path = ws_dir.path().join("marker.txt");
+        assert!(marker_path.exists());
+        let pre_crash_content = std::fs::read_to_string(&marker_path).unwrap();
+        assert_eq!(pre_crash_content, "hello_world\n");
+
+        std::fs::write(&marker_path, "modified_by_test\n").unwrap();
+
+        server.enqueue_response(MockResponse::tool_call(
+            &format!("call_cons_{}", iteration),
+            "write_file",
+            serde_json::json!({
+                "path": "marker.txt",
+                "content": "hello_world\n"
+            }),
+        ));
+        server.enqueue_response(MockResponse::final_answer("Completed resume run"));
+
+        let resume_out = Command::new(bin_path)
+            .env("NEXUS_API_KEY", "cli_test_key")
+            .env("NEXUS_ACTOR_ID", "author_alice")
+            .args([
+                "resume",
+                "--workflow",
+                workflow_path.to_str().unwrap(),
+                "--run-id",
+                &run_id,
+                "--workspace-root",
+                ws_dir.path().to_str().unwrap(),
+                "--db-path",
+                db_path.to_str().unwrap(),
+                "--api-base",
+                &server.url(),
+                "--model",
+                "gpt-4o",
+            ])
+            .output()
             .await
-            .unwrap()
-            .expect("journal entry must exist after abrupt termination");
-        assert_eq!(journal_entry.0, "consumed");
-        assert_eq!(
-            journal_entry.1.as_deref(),
-            Some(format!("result_{}", iteration).as_str())
+            .unwrap();
+
+        assert!(
+            resume_out.status.success(),
+            "resume failed: {}",
+            String::from_utf8_lossy(&resume_out.stderr)
         );
+        let resume_stdout = String::from_utf8_lossy(&resume_out.stdout);
+        assert!(resume_stdout.contains("Workflow run resumed and completed successfully"));
+
+        let post_resume_content = std::fs::read_to_string(&marker_path).unwrap();
+        assert_eq!(post_resume_content, "modified_by_test\n");
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tool_journal WHERE run_id = ?1",
+                [&run_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "consumed");
 
         pass_count += 1;
     }

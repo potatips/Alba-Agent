@@ -738,6 +738,28 @@ impl CheckpointStore for SqliteCheckpointStore {
         };
 
         if existing_status != "pending" {
+            let now_str = Utc::now().to_rfc3339();
+            let reject_details = serde_json::json!({
+                "approver_id": trimmed_actor,
+                "existing_status": existing_status,
+                "reason": "approval_already_decided",
+            })
+            .to_string();
+            let _ = conn.execute(
+                "INSERT INTO audit_logs (id, tenant_id, workspace_id, run_id, actor_id, action, target_id, details_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    scope.tenant_id.to_string(),
+                    scope.workspace_id.to_string(),
+                    scope.run_id.to_string(),
+                    trimmed_actor,
+                    "approval.already_decided_rejected",
+                    approval_id.to_string(),
+                    reject_details,
+                    now_str,
+                ],
+            );
             return Err(CheckpointError::InvalidState(
                 "Approval request not found, scope mismatched, or already decided".to_string(),
             ));

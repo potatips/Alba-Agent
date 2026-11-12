@@ -1,0 +1,84 @@
+{
+  "id": "22222222-2222-2222-2222-222222222222",
+  "tenant_id": "00000000-0000-0000-0000-000000000001",
+  "workspace_id": "00000000-0000-0000-0000-000000000002",
+  "name": "Tool Crash Workflow",
+  "version": 1,
+  "nodes": [
+    {
+      "kind": "start",
+      "id": "start",
+      "label": "Start",
+      "trigger_type": "manual",
+      "input_schema": null,
+      "schedule": null
+    },
+    {
+      "kind": "crew",
+      "id": "worker_crew",
+      "label": "Worker Crew",
+      "agents": [
+        {
+          "id": "cmd_worker",
+          "role": "Command Worker",
+          "goal": "Run command tool",
+          "backstory": "Executes workspace tools",
+          "model": "gpt-4o",
+          "tool_ids": ["write_file"],
+          "skill_ids": [],
+          "max_iterations": 3,
+          "temperature": 0.1,
+          "guardrails": []
+        }
+      ],
+      "tasks": [
+        {
+          "id": "task_cmd",
+          "agent_id": "cmd_worker",
+          "description": "Execute marker command",
+          "expected_output": "Marker recorded",
+          "output_schema": "text",
+          "context_task_ids": [],
+          "expected_artifact_paths": []
+        }
+      ],
+      "process": "sequential",
+      "consensus_config": {
+        "enabled": false,
+        "method": "majority_vote",
+        "min_agreement_fraction": 0.6,
+        "rounds": 1
+      },
+      "manager_agent_id": null,
+      "join": "any",
+      "expected_artifact_paths": [],
+      "requires_visual_evidence": false
+    },
+    {
+      "kind": "end",
+      "id": "end",
+      "label": "End"
+    }
+  ],
+  "edges": [
+    {
+      "source": "start",
+      "target": "worker_crew",
+      "route": null,
+      "loop_back": false
+    },
+    {
+      "source": "worker_crew",
+      "target": "end",
+      "route": null,
+      "loop_back": false
+    }
+  ],
+  "learning_edges": [],
+  "layout": {},
+  "modes": {
+    "speed": "normal",
+    "strict_evidence": false,
+    "interactive": false
+  }
+}

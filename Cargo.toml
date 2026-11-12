@@ -24,3 +24,7 @@ ignore = "0.4.23"
 
 [dev-dependencies]
 tempfile = "3.17.1"
+
+[features]
+default = ["failpoints"]
+failpoints = []

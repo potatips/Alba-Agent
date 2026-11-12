@@ -190,21 +190,6 @@ pub fn resolve_writable_file(
         }
     }
 
-    let mut check = real_root.clone();
-    for component in rel_buf.components() {
-        if let Component::Normal(part) = component {
-            check.push(part);
-            if let Ok(meta) = fs::symlink_metadata(&check) {
-                if meta.file_type().is_symlink() {
-                    return Err(ToolError::PathTraversal(format!(
-                        "Refusing to traverse or overwrite symbolic link at '{}'",
-                        raw
-                    )));
-                }
-            }
-        }
-    }
-
     if let Ok(meta) = fs::symlink_metadata(&target) {
         if meta.is_dir() {
             return Err(ToolError::InvalidArguments(format!(

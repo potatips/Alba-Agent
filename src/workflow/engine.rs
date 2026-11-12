@@ -298,6 +298,17 @@ where
                             ));
                         }
 
+                        let completed = self
+                            .checkpoint_store
+                            .complete_approval_execution(&scope, approval_id)
+                            .await?;
+
+                        if !completed {
+                            return Err(WorkflowExecutionError::Approval(
+                                "Failed to mark approval consumed".to_string(),
+                            ));
+                        }
+
                         self.event_sink.emit(RuntimeEvent::new(
                             scope,
                             RuntimeEventType::ApprovalResolved,

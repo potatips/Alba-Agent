@@ -40,7 +40,7 @@
 - [ ] G2 Rust Engine: WorkflowSpec executor in Alba (Crew sequential/hierarchical, ApprovalGate, Router, loop_back, ParallelBranch).
   - [x] S1 Validation: WorkflowSpec graph validator (acyclicity except declared loop_back, reachable End, router targets, agent resolution, explicit rejection of unsupported kinds).
   - [x] S2 Linear Crew Run: Start -> Crew (sequential) -> End with mock model, SQLite checkpoint per node, events emitted, exhaustive state enum.
-  - [ ] S3 Approval Gate: ApprovalGate pauses run (AwaitingApproval), CLI approve/deny, author != approver separation, fail-closed audit.
+  - [x] S3 Approval Gate: ApprovalGate pauses run (AwaitingApproval), CLI approve/deny, author != approver separation, fail-closed audit.
   - [ ] S4 Resume & Crash Safety: Tool idempotency journal in SQLite, resume from checkpoint, SIGKILL recovery test.
   - [ ] S5 Router, loop_back, ParallelBranch: Router rule evaluation, max_loop_iterations enforcement, join=all and join=any.
   - [ ] S6 Hierarchical Crew: Manager agent delegates to specialist agents via spec.

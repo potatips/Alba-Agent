@@ -1,0 +1,17 @@
+export type ChatModel = { id: string; model: string; provider: string; group: string; source: "workspace" | "platform"; local: boolean; unverified?: boolean };
+export type ModelGroup = { name: string; local: boolean; models: ChatModel[] };
+export type EffortChoice = { id: string; value: string; label: string };
+export function modelChoices(models: ChatModel[], selected: string | null): ChatModel[];
+export function effortChoices(models: ChatModel[], selected: string | null): EffortChoice[];
+export function preferredModelVariant(models: ChatModel[], target: string, selected: string | null): string;
+export const MODEL_STORAGE_KEY: string;
+export function modelLabel(id: string | null | undefined): string;
+export type SuggestedModel = { id: string; model: string; provider: string; group: string; connected: boolean };
+export function parseModelId(text: unknown): { provider: string; model: string; id: string } | null;
+export function resolveSelection(models: ChatModel[], remembered: string | null, serverDefault: string | null, reachableProviders?: string[]): string | null;
+export function groupModels(models: ChatModel[]): ModelGroup[];
+export function loadModel(storage: Pick<Storage, "getItem">): string | null;
+export function saveModel(storage: Pick<Storage, "setItem" | "removeItem">, id: string | null): void;
+export function loadRecent(storage: Pick<Storage, "getItem">): string[];
+export function rememberRecent(storage: Pick<Storage, "getItem" | "setItem">, id: string, limit?: number): void;
+export function pickerView(models: ChatModel[], recent: string[], query?: string): { recent: ChatModel[]; providers: ModelGroup[]; matches: ChatModel[] };

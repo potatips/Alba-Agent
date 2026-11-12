@@ -21,6 +21,51 @@ pub struct ListWorkflowsQuery {
 }
 
 #[derive(Deserialize)]
+pub struct ImportWorkflowQuery {
+    pub file_format: Option<String>,
+}
+
+pub async fn validate_workflow_handler(
+    _auth: AuthenticatedUser,
+    AppJson(spec): AppJson<WorkflowSpec>,
+) -> Result<Json<Value>, ApiError> {
+    validate_workflow_spec(&spec).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    Ok(Json(serde_json::json!({ "valid": true })))
+}
+
+pub async fn import_workflow_handler(
+    _auth: AuthenticatedUser,
+    State(state): State<AppState>,
+    Query(_query): Query<ImportWorkflowQuery>,
+    body: axum::body::Bytes,
+) -> Result<Json<WorkflowSpec>, ApiError> {
+    let spec: WorkflowSpec =
+        serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    validate_workflow_spec(&spec).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let spec_json = serde_json::to_string(&spec).map_err(|e| ApiError::internal(e.to_string()))?;
+    let id_str = spec.id.to_string();
+    state
+        .store
+        .insert_workflow(&id_str, &spec.name, None, &spec_json)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(spec))
+}
+
+pub async fn list_conversations_handler(
+    _auth: AuthenticatedUser,
+) -> Result<Json<Vec<Value>>, ApiError> {
+    Ok(Json(vec![]))
+}
+
+pub async fn list_templates_handler(
+    _auth: AuthenticatedUser,
+) -> Result<Json<Vec<Value>>, ApiError> {
+    Ok(Json(vec![]))
+}
+
+#[derive(Deserialize)]
 pub struct CreateRunRequest {
     #[serde(default)]
     pub input_data: Value,

@@ -1,0 +1,104 @@
+{
+  "id": "e2e00000-0000-0000-0000-000000000001",
+  "tenant_id": "00000000-0000-0000-0000-000000000001",
+  "workspace_id": "00000000-0000-0000-0000-000000000002",
+  "name": "E2E Approval Workflow Demo",
+  "version": 1,
+  "nodes": [
+    {
+      "kind": "start",
+      "id": "start",
+      "label": "Start Execution",
+      "trigger_type": "manual",
+      "input_schema": {
+        "type": "object"
+      },
+      "schedule": null
+    },
+    {
+      "kind": "crew",
+      "id": "crew_worker",
+      "label": "Researcher Agent",
+      "agents": [
+        {
+          "id": "researcher",
+          "role": "Researcher",
+          "goal": "Analyze project specifications and produce report",
+          "backstory": "Experienced researcher and analyst",
+          "model": "gemini-3.8-flash-high",
+          "tool_ids": [
+            "file_read"
+          ],
+          "skill_ids": [],
+          "max_iterations": 5,
+          "temperature": 0.2,
+          "guardrails": [],
+          "knowledge_capsule_ids": [],
+          "tier": "specialist"
+        }
+      ],
+      "tasks": [
+        {
+          "id": "task_research",
+          "agent_id": "researcher",
+          "description": "Analyze repository architecture",
+          "expected_output": "Analysis complete",
+          "output_schema": "text",
+          "output_schema_json": null,
+          "context_task_ids": [],
+          "expected_artifact_paths": []
+        }
+      ],
+      "process": "sequential",
+      "consensus_config": {
+        "strategy": "none",
+        "threshold": 1.0,
+        "max_rounds": 1
+      },
+      "manager_agent_id": null,
+      "join": "any",
+      "expected_artifact_paths": [],
+      "requires_visual_evidence": false
+    },
+    {
+      "kind": "approval",
+      "id": "gate_approval",
+      "label": "Security Approval Gate",
+      "action_description": "Approve publishing research report to workspace",
+      "required_role": "admin",
+      "timeout_seconds": 3600,
+      "boundary_rules": []
+    },
+    {
+      "kind": "end",
+      "id": "end",
+      "label": "Complete"
+    }
+  ],
+  "edges": [
+    {
+      "source": "start",
+      "target": "crew_worker",
+      "route": null,
+      "loop_back": false
+    },
+    {
+      "source": "crew_worker",
+      "target": "gate_approval",
+      "route": null,
+      "loop_back": false
+    },
+    {
+      "source": "gate_approval",
+      "target": "end",
+      "route": null,
+      "loop_back": false
+    }
+  ],
+  "learning_edges": [],
+  "layout": {},
+  "modes": {
+    "live": true,
+    "dry_run": false
+  }
+}

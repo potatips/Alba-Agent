@@ -25,7 +25,8 @@ use crate::server::routes::sse::stream_run;
 use crate::server::routes::tools::{list_builtin_tools_handler, list_skills_handler};
 use crate::server::routes::workflows::{
     create_workflow_handler, create_workflow_run_handler, get_workflow_handler,
-    list_workflows_handler, update_workflow_handler,
+    import_workflow_handler, list_conversations_handler, list_templates_handler,
+    list_workflows_handler, update_workflow_handler, validate_workflow_handler,
 };
 use crate::server::state::AppState;
 
@@ -47,6 +48,13 @@ pub fn create_app(state: AppState) -> Router {
             "/api/v1/workflows/{id}/runs",
             post(create_workflow_run_handler),
         )
+        .route(
+            "/api/v1/workflows/validate",
+            post(validate_workflow_handler),
+        )
+        .route("/api/v1/workflows/import", post(import_workflow_handler))
+        .route("/api/v1/conversations", get(list_conversations_handler))
+        .route("/api/v1/templates", get(list_templates_handler))
         .route("/api/v1/runs", get(list_runs_handler))
         .route("/api/v1/runs/{id}", get(get_run_handler))
         .route("/api/v1/runs/{id}/stream", get(stream_run))

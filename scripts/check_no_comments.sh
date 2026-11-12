@@ -13,7 +13,7 @@ import tokenize
 
 root = os.path.abspath(sys.argv[1])
 
-EXCLUDED_DIRS = {".git", "target", "vendor", "vendored", "node_modules", "dist"}
+EXCLUDED_DIRS = {".git", "target", "vendor", "vendored", "node_modules", "dist", "web"}
 EXCLUDED_FILES = {"Cargo.lock", "THIRD_PARTY_NOTICES.md"}
 SCAN_EXTS = {
     ".rs",

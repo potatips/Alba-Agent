@@ -1,0 +1,168 @@
+{
+  "id": "11111111-1111-1111-1111-111111111111",
+  "tenant_id": "00000000-0000-0000-0000-000000000001",
+  "workspace_id": "00000000-0000-0000-0000-000000000002",
+  "name": "Three Agent Approval Workflow",
+  "version": 1,
+  "nodes": [
+    {
+      "kind": "start",
+      "id": "start",
+      "label": "Start Node",
+      "trigger_type": "manual",
+      "input_schema": null,
+      "schedule": null
+    },
+    {
+      "kind": "crew",
+      "id": "research_crew",
+      "label": "Research Crew",
+      "agents": [
+        {
+          "id": "lead_researcher",
+          "role": "Research Director",
+          "goal": "Investigate target system telemetry",
+          "backstory": "Analytical lead investigator",
+          "model": "gpt-4o",
+          "tool_ids": [],
+          "skill_ids": [],
+          "max_iterations": 3,
+          "temperature": 0.1,
+          "guardrails": []
+        }
+      ],
+      "tasks": [
+        {
+          "id": "task_research",
+          "agent_id": "lead_researcher",
+          "description": "Investigate target system telemetry",
+          "expected_output": "Telemetry report compiled",
+          "output_schema": "text",
+          "context_task_ids": [],
+          "expected_artifact_paths": []
+        }
+      ],
+      "process": "sequential",
+      "consensus_config": {
+        "enabled": false,
+        "method": "majority_vote",
+        "min_agreement_fraction": 0.6,
+        "rounds": 1
+      },
+      "manager_agent_id": null,
+      "join": "any",
+      "expected_artifact_paths": [],
+      "requires_visual_evidence": false
+    },
+    {
+      "kind": "approval",
+      "id": "approval_gate",
+      "label": "Production Approval Gate",
+      "action_description": "Approve deployment to production cluster",
+      "required_role": "cluster_admin",
+      "timeout_seconds": 86400,
+      "boundary_rules": []
+    },
+    {
+      "kind": "crew",
+      "id": "deploy_crew",
+      "label": "Deployment Crew",
+      "agents": [
+        {
+          "id": "deployer",
+          "role": "Deploy Specialist",
+          "goal": "Deploy production release",
+          "backstory": "Precision release engineer",
+          "model": "gpt-4o",
+          "tool_ids": [],
+          "skill_ids": [],
+          "max_iterations": 3,
+          "temperature": 0.1,
+          "guardrails": []
+        },
+        {
+          "id": "verifier",
+          "role": "Quality Assurance Verifier",
+          "goal": "Verify release health and assertions",
+          "backstory": "Meticulous verification expert",
+          "model": "gpt-4o",
+          "tool_ids": [],
+          "skill_ids": [],
+          "max_iterations": 3,
+          "temperature": 0.1,
+          "guardrails": []
+        }
+      ],
+      "tasks": [
+        {
+          "id": "task_deploy",
+          "agent_id": "deployer",
+          "description": "Deploy production release",
+          "expected_output": "Production release deployed",
+          "output_schema": "text",
+          "context_task_ids": [],
+          "expected_artifact_paths": []
+        },
+        {
+          "id": "task_verify",
+          "agent_id": "verifier",
+          "description": "Verify production release health",
+          "expected_output": "Verification health checklist passed",
+          "output_schema": "text",
+          "context_task_ids": ["task_deploy"],
+          "expected_artifact_paths": []
+        }
+      ],
+      "process": "sequential",
+      "consensus_config": {
+        "enabled": false,
+        "method": "majority_vote",
+        "min_agreement_fraction": 0.6,
+        "rounds": 1
+      },
+      "manager_agent_id": null,
+      "join": "any",
+      "expected_artifact_paths": [],
+      "requires_visual_evidence": false
+    },
+    {
+      "kind": "end",
+      "id": "end",
+      "label": "End Node"
+    }
+  ],
+  "edges": [
+    {
+      "source": "start",
+      "target": "research_crew",
+      "route": null,
+      "loop_back": false
+    },
+    {
+      "source": "research_crew",
+      "target": "approval_gate",
+      "route": null,
+      "loop_back": false
+    },
+    {
+      "source": "approval_gate",
+      "target": "deploy_crew",
+      "route": null,
+      "loop_back": false
+    },
+    {
+      "source": "deploy_crew",
+      "target": "end",
+      "route": null,
+      "loop_back": false
+    }
+  ],
+  "learning_edges": [],
+  "layout": {},
+  "modes": {
+    "dry_run": false,
+    "interactive": false,
+    "auto_approve": false,
+    "log_level": "info"
+  }
+}

@@ -11,3 +11,4 @@ time	phase	decision	reason	evidence	result
 2026-11-12T09:49:00Z	G2-S5	router-and-parallel-branch	Implemented Router evaluation, loop_back bounds with max_loop_iterations, and ParallelBranch join modes	tests/workflow_s5_tests.rs (3 tests passed)	PASS
 2026-11-12T09:50:00Z	G2-S6	hierarchical-crew	Implemented Hierarchical crew orchestration with manager directives passed down to specialist agents	tests/workflow_s6_tests.rs (1 test passed)	PASS
 2026-11-12T09:53:00Z	G2-S7	workflow-fork-and-time-travel	Implemented workflow run forking from checkpoint sequence, branch recording, and parent immutability verification	tests/workflow_s7_tests.rs (1 test passed)	PASS
+2026-11-12T10:06:00Z	G2-S8	cli-and-e2e-workflow	Implemented CLI commands (run, resume, approve, deny, status, fork) with workflow support, automated 3-agent E2E scenario, SQLite integrity & audit assertions, and 20/20 SIGKILL flakiness check	tests/workflow_s8_e2e_tests.rs (2 tests passed, 20/20 flakiness)	PASS

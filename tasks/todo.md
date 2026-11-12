@@ -37,7 +37,7 @@
 ## Phases
 - [x] G0 Baseline: Measure NexusAgent (install size, idle RAM, startup time, sample run time); run pnpm lint/check/test + pytest. Record in `tasks/baseline.md`.
 - [x] G1 Contract: Catalog `/api/v1` endpoints used by `apps/web`; define minimal v1 contract; generate Rust Serde types from core-schema; design SQLite WAL schema.
-- [ ] G2 Rust Engine: WorkflowSpec executor in Alba (Crew sequential/hierarchical, ApprovalGate, Router, loop_back, ParallelBranch).
+- [x] G2 Rust Engine: WorkflowSpec executor in Alba (Crew sequential/hierarchical, ApprovalGate, Router, loop_back, ParallelBranch).
   - [x] S1 Validation: WorkflowSpec graph validator (acyclicity except declared loop_back, reachable End, router targets, agent resolution, explicit rejection of unsupported kinds).
   - [x] S2 Linear Crew Run: Start -> Crew (sequential) -> End with mock model, SQLite checkpoint per node, events emitted, exhaustive state enum.
   - [x] S3 Approval Gate: ApprovalGate pauses run (AwaitingApproval), CLI approve/deny, author != approver separation, fail-closed audit.
@@ -45,7 +45,7 @@
   - [x] S5 Router, loop_back, ParallelBranch: Router rule evaluation, max_loop_iterations enforcement, join=all and join=any.
   - [x] S6 Hierarchical Crew: Manager agent delegates to specialist agents via spec.
   - [x] S7 Fork & Time-Travel: fork run from checkpoint, rewind to checkpoint, hash compare.
-  - [ ] S8 CLI & Sample Workflow: CLI commands and 3-agent approval sample, end-to-end scenario automated in cargo test.
+  - [x] S8 CLI & Sample Workflow: CLI commands and 3-agent approval sample, end-to-end scenario automated in cargo test.
 - [ ] G3 Compatible API: axum serves `/api/v1` + SSE; apps/web completes one run end-to-end.
 - [ ] G4 Verification & Hooks: Validator, claims, evidence, Deny/Ask/Allow policy.
 - [ ] G5 Memory: Checkpoints + capsules (scope firewall) + embedded vectors + conversation compaction.
@@ -107,4 +107,28 @@
     2. `c68e2e9`: `feat(schema): G1 contract, types, SQLite schema`
     3. `daddc9e`: `fix(review): address G0/G1 review findings F1-F5`
   - Backup branch retained: `backup/feat-g1-contract-original` (`40de731`).
+- Verdict: PASS.
+
+### Phase G2 (Workflow Engine & CLI) - Implemented & Verified
+- Engine implementation:
+  - `src/workflow/validation.rs`: WorkflowSpec validator with topological cycle detection, reachability, router targets, and explicit rejection of RAG/Sandbox.
+  - `src/workflow/state.rs`: Exhaustive state enums (`WorkflowRunState`, `WorkflowNodeState`) with zero wildcard matches.
+  - `src/workflow/engine.rs`: Full `WorkflowExecutor` interpreting JSON/YAML specs without hardcoded logic; supports sequential and hierarchical crew (`manager_agent_id`), approval gates, router nodes with loopback iteration bounds, parallel branches (`JoinMode::All` and `JoinMode::Any`), time-travel forking, and idempotency journal replay.
+  - `src/checkpoints/sqlite.rs`: Step checkpoints, atomic `claim_workflow_approval` (`BEGIN IMMEDIATE`), author != approver separation, `fork_workflow_run`, and tool journal (`executing -> consumed`).
+  - `src/cli/commands.rs`: Added `--workflow` support to `run` and `resume`, `--actor` support to `approve` and `deny`, workflow status reporting in `status`, and workflow run forking in `fork`.
+- Automated test coverage across 8 vertical slices:
+  - `tests/validation_tests.rs`: 15 unit tests covering validation rules, unsupported node rejections, cycles, and loop_back edges.
+  - `tests/workflow_s2_tests.rs`: Linear sequential crew execution end-to-end with step checkpoints and runtime events.
+  - `tests/workflow_s3_tests.rs`: Approval gate pause (`AwaitingApproval`), CLI resolution (`allow_once` and `deny`), self-approval rejection, and fail-closed audit log verification.
+  - `tests/workflow_s4_tests.rs`: SQLite tool journal idempotency, recovery from crashed tool calls, and WAL integrity verification.
+  - `tests/workflow_s5_tests.rs`: Router rule evaluation (`equals`, `contains`, `is_empty`, `is_not_empty`), loopback execution bounded by `max_loop_iterations`, and parallel branch joins.
+  - `tests/workflow_s6_tests.rs`: Hierarchical crew orchestration with manager directives passed down to specialist agents.
+  - `tests/workflow_s7_tests.rs`: Historical checkpoint forking, trajectory branch persistence, parent run immutability assertion, and divergent execution.
+  - `tests/workflow_s8_e2e_tests.rs`: Complete 5-step scenario on 3-agent workflow (`lead_researcher -> approval_gate -> deployer + verifier`) via CLI binary (`run`, `status`, `approve`, `resume`, `fork`, `deny`), exact SQLite assertions (10 parent checkpoints, 6 forked checkpoints, consumed/denied approvals, audit logs, trajectory branches), and 20/20 flakiness test.
+- Empirical Verification Gates in `alba/`:
+  - `cargo fmt --check`: PASS.
+  - `cargo clippy --all-targets -- -D warnings`: PASS (0 warnings).
+  - `cargo test`: PASS (70 passed, 0 failed across 10 test suites in 4.90s).
+  - `cargo deny check`: PASS (advisories ok, bans ok, licenses ok, sources ok).
+  - `./scripts/check_no_comments.sh`: PASS (0 comments found across 106 checked files).
 - Verdict: PASS.

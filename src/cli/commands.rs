@@ -17,8 +17,10 @@ use crate::events::sink::{ConfiguredEventSink, JsonLinesEventSink, NullEventSink
 use crate::governance::policy::DefaultApprovalPolicy;
 use crate::models::adapter::OpenAiCompatibleClient;
 use crate::models::types::ModelConfig;
+use crate::schema::WorkflowSpec;
 use crate::tools::register_workspace_tools;
 use crate::tools::types::ToolRegistry;
+use crate::workflow::engine::{WorkflowExecutor, WorkflowOutcome};
 
 pub const DEFAULT_TENANT_ID: &str = "00000000-0000-0000-0000-000000000001";
 pub const DEFAULT_WORKSPACE_ID: &str = "00000000-0000-0000-0000-000000000002";
@@ -44,7 +46,10 @@ pub enum Commands {
 #[derive(Args, Debug)]
 pub struct RunArgs {
     #[arg(short, long)]
-    pub prompt: String,
+    pub prompt: Option<String>,
+
+    #[arg(long)]
+    pub workflow: Option<PathBuf>,
 
     #[arg(long)]
     pub tenant_id: Option<String>,
@@ -119,6 +124,9 @@ pub struct ApproveArgs {
     pub decision: String,
 
     #[arg(long)]
+    pub actor: Option<String>,
+
+    #[arg(long)]
     pub tenant_id: Option<String>,
 
     #[arg(long)]
@@ -140,6 +148,9 @@ pub struct DenyArgs {
     pub approval_id: String,
 
     #[arg(long)]
+    pub actor: Option<String>,
+
+    #[arg(long)]
     pub tenant_id: Option<String>,
 
     #[arg(long)]
@@ -156,6 +167,9 @@ pub struct DenyArgs {
 pub struct ResumeArgs {
     #[arg(short, long)]
     pub run_id: String,
+
+    #[arg(long)]
+    pub workflow: Option<PathBuf>,
 
     #[arg(long)]
     pub tenant_id: Option<String>,
@@ -502,6 +516,75 @@ pub async fn handle_run(args: RunArgs) -> Result<(), Box<dyn std::error::Error>>
         limits.max_bytes = b;
     }
 
+    if let Some(wf_path) = args.workflow {
+        let raw = std::fs::read_to_string(&wf_path)?;
+        let spec: WorkflowSpec = serde_json::from_str(&raw)
+            .map_err(|e| format!("Failed to parse workflow JSON: {}", e))?;
+
+        let mut executor = WorkflowExecutor::new(
+            client,
+            checkpoint_store,
+            event_sink,
+            Arc::new(policy),
+            registry,
+            &args.workspace_root,
+        );
+
+        if let Ok(actor) = resolve_trusted_actor(config.as_ref()) {
+            executor = executor.with_author_id(actor);
+        }
+
+        print_human(
+            human_to_stderr,
+            &format!("Starting workflow run {}", scope.run_id),
+        );
+        let outcome = executor.start_workflow(&spec, scope, None).await?;
+
+        match outcome {
+            WorkflowOutcome::Completed(resp) => {
+                print_human(
+                    human_to_stderr,
+                    &format!("Workflow run completed successfully:\n{}", resp),
+                );
+            }
+            WorkflowOutcome::AwaitingApproval {
+                approval_id,
+                action_description,
+                node_id,
+            } => {
+                print_human(human_to_stderr, "Workflow run paused for human approval.");
+                print_human(human_to_stderr, &format!("Node: {}", node_id));
+                print_human(human_to_stderr, &format!("Approval ID: {}", approval_id));
+                print_human(human_to_stderr, &format!("Action: {}", action_description));
+                print_human(
+                    human_to_stderr,
+                    &format!(
+                        "Use `nexus-albaai approve --run-id {} --approval-id {} --decision allow_once` to approve.",
+                        scope.run_id, approval_id
+                    ),
+                );
+            }
+            WorkflowOutcome::Failed(err) => {
+                eprintln!("Workflow run failed: {}", err);
+            }
+            WorkflowOutcome::Cancelled => {
+                print_human(human_to_stderr, "Workflow run was cancelled.");
+            }
+            WorkflowOutcome::Paused { node_id } => {
+                print_human(
+                    human_to_stderr,
+                    &format!("Workflow paused at node {}.", node_id),
+                );
+            }
+        }
+
+        return Ok(());
+    }
+
+    let prompt = args
+        .prompt
+        .ok_or_else(|| "Either --prompt or --workflow must be specified".to_string())?;
+
     let mut engine = AgentEngine::new(
         client,
         checkpoint_store,
@@ -516,7 +599,7 @@ pub async fn handle_run(args: RunArgs) -> Result<(), Box<dyn std::error::Error>>
     }
 
     print_human(human_to_stderr, &format!("Starting run {}", scope.run_id));
-    let outcome = engine.start_run(scope, &args.prompt).await?;
+    let outcome = engine.start_run(scope, &prompt).await?;
 
     match outcome {
         EngineOutcome::Completed(resp) => {
@@ -563,6 +646,32 @@ pub async fn handle_status(args: StatusArgs) -> Result<(), Box<dyn std::error::E
     )?;
     let checkpoint_store = SqliteCheckpointStore::new(&args.db_path)?;
 
+    let latest_wf = checkpoint_store.get_latest_workflow_step(&scope).await?;
+    if let Some(wf_step) = latest_wf {
+        let run_state_str = match serde_json::from_value::<
+            crate::workflow::state::WorkflowExecutionContext,
+        >(wf_step.state_json.clone())
+        {
+            Ok(ctx) => ctx.run_state.as_str().to_string(),
+            Err(_) => wf_step.status.as_str().to_string(),
+        };
+        println!("Run ID: {}", wf_step.scope.run_id);
+        println!("Tenant ID: {}", wf_step.scope.tenant_id);
+        println!("Workspace ID: {}", wf_step.scope.workspace_id);
+        println!("Status: {}", run_state_str);
+        println!("Node: {}", wf_step.node_id);
+        println!("Sequence: {}", wf_step.sequence);
+        if let Some(app_id) = wf_step.pending_approval_id {
+            println!("Pending approval ID: {}", app_id);
+            if let Some(app) = checkpoint_store.get_approval(&scope, app_id).await? {
+                println!("Approval tool: {}", app.tool_name);
+                println!("Approval action: {}", app.action_description);
+                println!("Approval status: {}", app.status.as_str());
+            }
+        }
+        return Ok(());
+    }
+
     let latest = checkpoint_store.get_latest_checkpoint(&scope).await?;
     let cancelled = checkpoint_store.is_cancelled(&scope).await?;
     match latest {
@@ -592,7 +701,10 @@ pub async fn handle_status(args: StatusArgs) -> Result<(), Box<dyn std::error::E
 
 pub async fn handle_approve(args: ApproveArgs) -> Result<(), Box<dyn std::error::Error>> {
     let config = load_trusted_config(args.config.as_deref())?;
-    let actor = resolve_trusted_actor(config.as_ref())?;
+    let actor = match args.actor {
+        Some(a) => a,
+        None => resolve_trusted_actor(config.as_ref())?,
+    };
     let scope = resolve_scope(
         config.as_ref(),
         args.tenant_id.as_deref(),
@@ -630,7 +742,10 @@ pub async fn handle_approve(args: ApproveArgs) -> Result<(), Box<dyn std::error:
 
 pub async fn handle_deny(args: DenyArgs) -> Result<(), Box<dyn std::error::Error>> {
     let config = load_trusted_config(args.config.as_deref())?;
-    let actor = resolve_trusted_actor(config.as_ref())?;
+    let actor = match args.actor {
+        Some(a) => a,
+        None => resolve_trusted_actor(config.as_ref())?,
+    };
     let scope = resolve_scope(
         config.as_ref(),
         args.tenant_id.as_deref(),
@@ -677,6 +792,67 @@ pub async fn handle_resume(args: ResumeArgs) -> Result<(), Box<dyn std::error::E
     );
 
     let client = Arc::new(OpenAiCompatibleClient::new(model_config)?);
+
+    if let Some(wf_path) = args.workflow {
+        let raw = std::fs::read_to_string(&wf_path)?;
+        let spec: WorkflowSpec = serde_json::from_str(&raw)
+            .map_err(|e| format!("Failed to parse workflow JSON: {}", e))?;
+
+        let mut executor = WorkflowExecutor::new(
+            client,
+            checkpoint_store,
+            event_sink,
+            policy,
+            registry,
+            &args.workspace_root,
+        );
+
+        if let Ok(actor) = resolve_trusted_actor(config.as_ref()) {
+            executor = executor.with_author_id(actor);
+        }
+
+        print_human(
+            human_to_stderr,
+            &format!("Resuming workflow run {}", scope.run_id),
+        );
+        let outcome = executor.resume_workflow(&spec, scope).await?;
+
+        match outcome {
+            WorkflowOutcome::Completed(resp) => {
+                print_human(
+                    human_to_stderr,
+                    &format!("Workflow run resumed and completed successfully:\n{}", resp),
+                );
+            }
+            WorkflowOutcome::AwaitingApproval {
+                approval_id,
+                action_description,
+                node_id,
+            } => {
+                print_human(
+                    human_to_stderr,
+                    "Workflow run is still paused waiting for approval.",
+                );
+                print_human(human_to_stderr, &format!("Node: {}", node_id));
+                print_human(human_to_stderr, &format!("Approval ID: {}", approval_id));
+                print_human(human_to_stderr, &format!("Action: {}", action_description));
+            }
+            WorkflowOutcome::Failed(err) => {
+                eprintln!("Workflow run failed after resume: {}", err);
+            }
+            WorkflowOutcome::Cancelled => {
+                print_human(human_to_stderr, "Workflow run was cancelled.");
+            }
+            WorkflowOutcome::Paused { node_id } => {
+                print_human(
+                    human_to_stderr,
+                    &format!("Workflow paused at node {}.", node_id),
+                );
+            }
+        }
+
+        return Ok(());
+    }
 
     let mut limits = HistoryLimits::default();
     if let Some(m) = args.max_history_messages {
@@ -734,6 +910,10 @@ pub async fn handle_cancel(args: CancelArgs) -> Result<(), Box<dyn std::error::E
         .get_latest_checkpoint(&scope)
         .await?
         .is_none()
+        && checkpoint_store
+            .get_latest_workflow_step(&scope)
+            .await?
+            .is_none()
     {
         return Err(format!(
             "No checkpoints found for run {} in current scope",
@@ -755,12 +935,30 @@ pub async fn handle_fork(args: ForkArgs) -> Result<(), Box<dyn std::error::Error
         args.workspace_id.as_deref(),
         &args.run_id,
     )?;
+
+    let checkpoint_store = SqliteCheckpointStore::new(&args.db_path)?;
+
+    let wf_steps = checkpoint_store.list_workflow_steps(&scope).await?;
+    if !wf_steps.is_empty() {
+        let (forked_scope, branch) = checkpoint_store
+            .fork_workflow_run(&scope, args.sequence, &args.branch_label)
+            .await?;
+        println!(
+            "Forked workflow run {} from parent {} at sequence {} (branch '{}', branch_id {})",
+            forked_scope.run_id,
+            branch.parent_run_id,
+            branch.fork_sequence,
+            branch.branch_label,
+            branch.branch_id
+        );
+        return Ok(());
+    }
+
     let new_run_id = match args.new_run_id {
         Some(raw) => Some(Uuid::parse_str(&raw).map_err(|e| format!("Invalid new_run_id: {}", e))?),
         None => None,
     };
     let author_id = resolve_trusted_actor(config.as_ref()).ok();
-    let checkpoint_store = SqliteCheckpointStore::new(&args.db_path)?;
     let (cp, branch) = checkpoint_store
         .fork_run(&ForkRunRequest {
             source_scope: scope,

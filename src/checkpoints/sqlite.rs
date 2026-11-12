@@ -1819,4 +1819,137 @@ impl CheckpointStore for SqliteCheckpointStore {
         .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
         Ok(())
     }
+
+    async fn fork_workflow_run(
+        &self,
+        source_scope: &ExecutionScope,
+        target_sequence: u32,
+        branch_label: &str,
+    ) -> Result<(ExecutionScope, TrajectoryBranch), CheckpointError> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, sequence, node_id, status, state_json, pending_approval_id, created_at
+                 FROM workflow_checkpoints
+                 WHERE run_id = ?1 AND tenant_id = ?2 AND workspace_id = ?3 AND sequence <= ?4
+                 ORDER BY sequence ASC",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(
+                params![
+                    source_scope.run_id.to_string(),
+                    source_scope.tenant_id.to_string(),
+                    source_scope.workspace_id.to_string(),
+                    target_sequence,
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u32>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        let mut steps = Vec::new();
+        for r in rows {
+            steps.push(r.map_err(|e| CheckpointError::DatabaseError(e.to_string()))?);
+        }
+        drop(stmt);
+
+        if steps.is_empty() {
+            return Err(CheckpointError::NotFound(format!(
+                "No checkpoints found for run {} at or before sequence {}",
+                source_scope.run_id, target_sequence
+            )));
+        }
+
+        let has_target = steps.iter().any(|s| s.1 == target_sequence);
+        if !has_target {
+            return Err(CheckpointError::NotFound(format!(
+                "Target sequence {} not found for run {}",
+                target_sequence, source_scope.run_id
+            )));
+        }
+
+        let forked_run_id = Uuid::new_v4();
+        let forked_scope = ExecutionScope::new(
+            source_scope.tenant_id,
+            source_scope.workspace_id,
+            forked_run_id,
+        )
+        .map_err(|e| CheckpointError::InvalidState(e.to_string()))?;
+
+        let now = Utc::now();
+        let branch = TrajectoryBranch {
+            branch_id: Uuid::new_v4(),
+            tenant_id: source_scope.tenant_id,
+            workspace_id: source_scope.workspace_id,
+            parent_run_id: source_scope.run_id,
+            forked_run_id,
+            fork_sequence: target_sequence,
+            branch_label: branch_label.to_string(),
+            model_override: None,
+            prompt_override: None,
+            created_at: now,
+        };
+
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        for (_, seq, node_id, status_str, state_json, pending_app, created_at) in steps {
+            tx.execute(
+                "INSERT INTO workflow_checkpoints (id, run_id, tenant_id, workspace_id, sequence, node_id, status, state_json, pending_approval_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    forked_run_id.to_string(),
+                    source_scope.tenant_id.to_string(),
+                    source_scope.workspace_id.to_string(),
+                    seq,
+                    node_id,
+                    status_str,
+                    state_json,
+                    pending_app,
+                    created_at,
+                ],
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        }
+
+        tx.execute(
+            "INSERT INTO trajectory_branches (branch_id, tenant_id, workspace_id, parent_run_id, forked_run_id, fork_sequence, branch_label, model_override, prompt_override, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                branch.branch_id.to_string(),
+                branch.tenant_id.to_string(),
+                branch.workspace_id.to_string(),
+                branch.parent_run_id.to_string(),
+                branch.forked_run_id.to_string(),
+                branch.fork_sequence,
+                branch.branch_label,
+                branch.model_override,
+                branch.prompt_override,
+                branch.created_at.to_rfc3339(),
+            ],
+        )
+        .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        tx.commit()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        Ok((forked_scope, branch))
+    }
 }

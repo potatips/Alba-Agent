@@ -10,3 +10,4 @@ time	phase	decision	reason	evidence	result
 2026-11-12T09:45:00Z	G2-S4	tool-journal-and-crash-safety	Implemented SQLite tool journal (executing -> consumed), idempotency resume, and fail-closed crash recovery	tests/workflow_s4_tests.rs (3 tests passed)	PASS
 2026-11-12T09:49:00Z	G2-S5	router-and-parallel-branch	Implemented Router evaluation, loop_back bounds with max_loop_iterations, and ParallelBranch join modes	tests/workflow_s5_tests.rs (3 tests passed)	PASS
 2026-11-12T09:50:00Z	G2-S6	hierarchical-crew	Implemented Hierarchical crew orchestration with manager directives passed down to specialist agents	tests/workflow_s6_tests.rs (1 test passed)	PASS
+2026-11-12T09:53:00Z	G2-S7	workflow-fork-and-time-travel	Implemented workflow run forking from checkpoint sequence, branch recording, and parent immutability verification	tests/workflow_s7_tests.rs (1 test passed)	PASS

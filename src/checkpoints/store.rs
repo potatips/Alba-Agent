@@ -162,4 +162,12 @@ pub trait CheckpointStore: Send + Sync {
         tool_call_id: &str,
         output: &str,
     ) -> impl std::future::Future<Output = Result<(), CheckpointError>> + Send;
+
+    fn fork_workflow_run(
+        &self,
+        source_scope: &ExecutionScope,
+        target_sequence: u32,
+        branch_label: &str,
+    ) -> impl std::future::Future<Output = Result<(ExecutionScope, TrajectoryBranch), CheckpointError>>
+           + Send;
 }

@@ -356,6 +356,33 @@ where
         self.execute_flow(spec, scope, &mut context).await
     }
 
+    pub async fn fork_workflow(
+        &self,
+        source_scope: &ExecutionScope,
+        target_sequence: u32,
+        branch_label: impl Into<String>,
+    ) -> Result<ExecutionScope, WorkflowExecutionError> {
+        let label = branch_label.into();
+        let (forked_scope, branch) = self
+            .checkpoint_store
+            .fork_workflow_run(source_scope, target_sequence, &label)
+            .await?;
+
+        self.event_sink.emit(RuntimeEvent::new(
+            forked_scope,
+            RuntimeEventType::TrajectoryForked,
+            serde_json::json!({
+                "branch_id": branch.branch_id.to_string(),
+                "parent_run_id": source_scope.run_id.to_string(),
+                "forked_run_id": forked_scope.run_id.to_string(),
+                "fork_sequence": target_sequence,
+                "branch_label": label,
+            }),
+        ))?;
+
+        Ok(forked_scope)
+    }
+
     async fn execute_flow(
         &self,
         spec: &WorkflowSpec,

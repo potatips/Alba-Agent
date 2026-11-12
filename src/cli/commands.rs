@@ -41,6 +41,22 @@ pub enum Commands {
     Resume(ResumeArgs),
     Cancel(CancelArgs),
     Fork(ForkArgs),
+    Serve(ServeArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ServeArgs {
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+
+    #[arg(short, long, default_value_t = 8000)]
+    pub port: u16,
+
+    #[arg(long)]
+    pub db: Option<PathBuf>,
+
+    #[arg(long)]
+    pub workspace_root: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -979,5 +995,17 @@ pub async fn handle_fork(args: ForkArgs) -> Result<(), Box<dyn std::error::Error
         branch.branch_label,
         branch.branch_id
     );
+    Ok(())
+}
+
+pub async fn handle_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let db_path = args.db.unwrap_or_else(|| PathBuf::from("checkpoints.db"));
+    let store = Arc::new(SqliteCheckpointStore::new(&db_path)?);
+    let workspace_root = args.workspace_root.unwrap_or_else(|| PathBuf::from("."));
+    let state = crate::server::state::AppState::new(store, workspace_root);
+    let addr = format!("{}:{}", args.host, args.port);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    println!("Alba server listening on http://{}", addr);
+    crate::server::serve_app(state, listener).await?;
     Ok(())
 }

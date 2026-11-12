@@ -69,3 +69,55 @@ pub struct AuditLogEntry {
     pub details: serde_json::Value,
     pub created_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowSummary {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunRecord {
+    pub id: String,
+    pub workflow_id: String,
+    pub status: String,
+    pub input_data: String,
+    pub output_data: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRecord {
+    pub id: String,
+    pub run_id: String,
+    pub filename: String,
+    pub file_path: String,
+    pub file_size: i64,
+    pub mime_type: String,
+    pub sha256: String,
+    pub verified: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapsuleRecord {
+    pub id: String,
+    pub title: String,
+    pub trigger_pattern: String,
+    pub advice: String,
+    pub scope: String,
+    pub sensitivity: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionPolicyRecord {
+    pub default_mode: String,
+    pub allowed_domains: Vec<String>,
+    pub denied_domains: Vec<String>,
+}

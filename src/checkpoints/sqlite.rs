@@ -12,12 +12,14 @@ use uuid::Uuid;
 
 use crate::checkpoints::store::{CheckpointError, CheckpointStore};
 use crate::checkpoints::types::{
-    AuditLogEntry, ForkRunRequest, RunCheckpoint, TrajectoryBranch, WorkflowStepCheckpoint,
+    ArtifactRecord, AuditLogEntry, CapsuleRecord, ExecutionPolicyRecord, ForkRunRequest,
+    RunCheckpoint, RunRecord, TrajectoryBranch, WorkflowStepCheckpoint, WorkflowSummary,
 };
 use crate::domain::{
     ActionIntentKind, ApprovalDecision, ApprovalRequest, ApprovalStatus, ChatMessage,
     ExecutionScope, MessageRole, RunStatus, ToolCall,
 };
+use crate::schema::ApprovalRequestSpec;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SerializedCheckpointState {
@@ -376,7 +378,554 @@ impl SqliteCheckpointStore {
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
         }
 
+        if current_version < 5 {
+            conn.execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS workflow_specs (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    spec_json TEXT NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS runs (
+                    id TEXT PRIMARY KEY,
+                    workflow_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    input_data TEXT NOT NULL,
+                    output_data TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS artifacts (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    verified INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS capsules (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    trigger_pattern TEXT NOT NULL,
+                    advice TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    sensitivity TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS execution_policy (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    default_mode TEXT NOT NULL,
+                    allowed_domains_json TEXT NOT NULL,
+                    denied_domains_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                INSERT OR IGNORE INTO execution_policy (id, default_mode, allowed_domains_json, denied_domains_json, updated_at)
+                VALUES (1, 'ask', '[\"api.anthropic.com\",\"generativelanguage.googleapis.com\"]', '[\"169.254.169.254\"]', datetime('now'));
+
+                CREATE INDEX IF NOT EXISTS idx_runs_workflow ON runs(workflow_id);
+                CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id);
+
+                INSERT INTO schema_migrations (version, applied_at)
+                VALUES (5, datetime('now'));
+                ",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        }
+
         Ok(())
+    }
+
+    pub fn insert_workflow(
+        &self,
+        id: &str,
+        name: &str,
+        description: Option<&str>,
+        spec_json: &str,
+    ) -> Result<(), CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO workflow_specs (id, name, description, spec_json, version, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6)",
+            params![id, name, description, spec_json, now, now],
+        )
+        .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn update_workflow(
+        &self,
+        id: &str,
+        name: &str,
+        description: Option<&str>,
+        spec_json: &str,
+    ) -> Result<bool, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let now = Utc::now().to_rfc3339();
+        let rows = conn
+            .execute(
+                "UPDATE workflow_specs SET name = ?1, description = ?2, spec_json = ?3, updated_at = ?4 WHERE id = ?5",
+                params![name, description, spec_json, now, id],
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        Ok(rows > 0)
+    }
+
+    pub fn get_workflow(&self, id: &str) -> Result<Option<String>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        conn.query_row(
+            "SELECT spec_json FROM workflow_specs WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| CheckpointError::DatabaseError(e.to_string()))
+    }
+
+    pub fn list_workflows(&self, limit: usize) -> Result<Vec<WorkflowSummary>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, description, created_at, updated_at
+                 FROM workflow_specs
+                 ORDER BY created_at DESC
+                 LIMIT ?1",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![limit as i64], |r| {
+                Ok(WorkflowSummary {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    description: r.get(2)?,
+                    created_at: r.get(3)?,
+                    updated_at: r.get(4)?,
+                })
+            })
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| CheckpointError::DatabaseError(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
+    pub fn insert_run(&self, run: &RunRecord) -> Result<(), CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        conn.execute(
+            "INSERT INTO runs (id, workflow_id, status, input_data, output_data, created_at, updated_at, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                run.id,
+                run.workflow_id,
+                run.status,
+                run.input_data,
+                run.output_data,
+                run.created_at,
+                run.updated_at,
+                run.completed_at,
+            ],
+        )
+        .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn update_run_status(
+        &self,
+        id: &str,
+        status: &str,
+        output_data: Option<&str>,
+        completed_at: Option<&str>,
+    ) -> Result<bool, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let now = Utc::now().to_rfc3339();
+        let rows = conn
+            .execute(
+                "UPDATE runs SET status = ?1, output_data = coalesce(?2, output_data), completed_at = coalesce(?3, completed_at), updated_at = ?4 WHERE id = ?5",
+                params![status, output_data, completed_at, now, id],
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        Ok(rows > 0)
+    }
+
+    pub fn get_run(&self, id: &str) -> Result<Option<RunRecord>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        conn.query_row(
+            "SELECT id, workflow_id, status, input_data, output_data, created_at, updated_at, completed_at
+             FROM runs WHERE id = ?1",
+            params![id],
+            |r| {
+                Ok(RunRecord {
+                    id: r.get(0)?,
+                    workflow_id: r.get(1)?,
+                    status: r.get(2)?,
+                    input_data: r.get(3)?,
+                    output_data: r.get(4)?,
+                    created_at: r.get(5)?,
+                    updated_at: r.get(6)?,
+                    completed_at: r.get(7)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| CheckpointError::DatabaseError(e.to_string()))
+    }
+
+    pub fn list_runs(
+        &self,
+        workflow_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RunRecord>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut out = Vec::new();
+        if let Some(wf_id) = workflow_id {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, workflow_id, status, input_data, output_data, created_at, updated_at, completed_at
+                     FROM runs
+                     WHERE workflow_id = ?1
+                     ORDER BY created_at DESC
+                     LIMIT ?2",
+                )
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let rows = stmt
+                .query_map(params![wf_id, limit as i64], |r| {
+                    Ok(RunRecord {
+                        id: r.get(0)?,
+                        workflow_id: r.get(1)?,
+                        status: r.get(2)?,
+                        input_data: r.get(3)?,
+                        output_data: r.get(4)?,
+                        created_at: r.get(5)?,
+                        updated_at: r.get(6)?,
+                        completed_at: r.get(7)?,
+                    })
+                })
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            for r in rows {
+                out.push(r.map_err(|e| CheckpointError::DatabaseError(e.to_string()))?);
+            }
+        } else {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, workflow_id, status, input_data, output_data, created_at, updated_at, completed_at
+                     FROM runs
+                     ORDER BY created_at DESC
+                     LIMIT ?1",
+                )
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let rows = stmt
+                .query_map(params![limit as i64], |r| {
+                    Ok(RunRecord {
+                        id: r.get(0)?,
+                        workflow_id: r.get(1)?,
+                        status: r.get(2)?,
+                        input_data: r.get(3)?,
+                        output_data: r.get(4)?,
+                        created_at: r.get(5)?,
+                        updated_at: r.get(6)?,
+                        completed_at: r.get(7)?,
+                    })
+                })
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            for r in rows {
+                out.push(r.map_err(|e| CheckpointError::DatabaseError(e.to_string()))?);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn insert_artifact(&self, artifact: &ArtifactRecord) -> Result<(), CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        conn.execute(
+            "INSERT INTO artifacts (id, run_id, filename, file_path, file_size, mime_type, sha256, verified, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                artifact.id,
+                artifact.run_id,
+                artifact.filename,
+                artifact.file_path,
+                artifact.file_size,
+                artifact.mime_type,
+                artifact.sha256,
+                if artifact.verified { 1 } else { 0 },
+                artifact.created_at,
+            ],
+        )
+        .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn list_artifacts(&self, run_id: &str) -> Result<Vec<ArtifactRecord>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, run_id, filename, file_path, file_size, mime_type, sha256, verified, created_at
+                 FROM artifacts
+                 WHERE run_id = ?1
+                 ORDER BY created_at ASC",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![run_id], |r| {
+                let v: i64 = r.get(7)?;
+                Ok(ArtifactRecord {
+                    id: r.get(0)?,
+                    run_id: r.get(1)?,
+                    filename: r.get(2)?,
+                    file_path: r.get(3)?,
+                    file_size: r.get(4)?,
+                    mime_type: r.get(5)?,
+                    sha256: r.get(6)?,
+                    verified: v != 0,
+                    created_at: r.get(8)?,
+                })
+            })
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| CheckpointError::DatabaseError(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
+    pub fn insert_capsule(&self, capsule: &CapsuleRecord) -> Result<(), CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        conn.execute(
+            "INSERT INTO capsules (id, title, trigger_pattern, advice, scope, sensitivity, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                capsule.id,
+                capsule.title,
+                capsule.trigger_pattern,
+                capsule.advice,
+                capsule.scope,
+                capsule.sensitivity,
+                capsule.created_at,
+            ],
+        )
+        .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn list_capsules(&self) -> Result<Vec<CapsuleRecord>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, title, trigger_pattern, advice, scope, sensitivity, created_at
+                 FROM capsules
+                 ORDER BY created_at DESC",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(CapsuleRecord {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    trigger_pattern: r.get(2)?,
+                    advice: r.get(3)?,
+                    scope: r.get(4)?,
+                    sensitivity: r.get(5)?,
+                    created_at: r.get(6)?,
+                })
+            })
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| CheckpointError::DatabaseError(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
+    pub fn get_execution_policy(&self) -> Result<ExecutionPolicyRecord, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        conn.query_row(
+            "SELECT default_mode, allowed_domains_json, denied_domains_json FROM execution_policy WHERE id = 1",
+            [],
+            |r| {
+                let default_mode: String = r.get(0)?;
+                let allowed_json: String = r.get(1)?;
+                let denied_json: String = r.get(2)?;
+                let allowed_domains = serde_json::from_str(&allowed_json).unwrap_or_default();
+                let denied_domains = serde_json::from_str(&denied_json).unwrap_or_default();
+                Ok(ExecutionPolicyRecord {
+                    default_mode,
+                    allowed_domains,
+                    denied_domains,
+                })
+            },
+        )
+        .map_err(|e| CheckpointError::DatabaseError(e.to_string()))
+    }
+
+    pub fn update_execution_policy(
+        &self,
+        policy: &ExecutionPolicyRecord,
+    ) -> Result<(), CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let allowed_json = serde_json::to_string(&policy.allowed_domains)
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let denied_json = serde_json::to_string(&policy.denied_domains)
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE execution_policy SET default_mode = ?1, allowed_domains_json = ?2, denied_domains_json = ?3, updated_at = ?4 WHERE id = 1",
+            params![policy.default_mode, allowed_json, denied_json, now],
+        )
+        .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn list_pending_approvals_by_run(
+        &self,
+        run_id: Option<&str>,
+    ) -> Result<Vec<ApprovalRequestSpec>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut out = Vec::new();
+        if let Some(r_id) = run_id {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, run_id, tenant_id, workspace_id, tool_name, arguments_json, author_id, status, approver_actor, decision
+                     FROM approvals
+                     WHERE run_id = ?1 AND status = 'pending'
+                     ORDER BY created_at ASC",
+                )
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let rows = stmt
+                .query_map(params![r_id], |r| {
+                    let id_str: String = r.get(0)?;
+                    let run_id_str: String = r.get(1)?;
+                    let tenant_id_str: String = r.get(2)?;
+                    let workspace_id_str: String = r.get(3)?;
+                    let tool_name: String = r.get(4)?;
+                    let args_str: String = r.get(5)?;
+                    let author_actor: String = r.get(6).unwrap_or_default();
+                    let status: String = r.get(7)?;
+                    let approver_actor: Option<String> = r.get(8)?;
+                    let decision: Option<String> = r.get(9)?;
+                    let parameters: serde_json::Value =
+                        serde_json::from_str(&args_str).unwrap_or(serde_json::Value::Null);
+                    Ok(ApprovalRequestSpec {
+                        id: Uuid::from_str(&id_str).unwrap_or_default(),
+                        run_id: Uuid::from_str(&run_id_str).unwrap_or_default(),
+                        tenant_id: Uuid::from_str(&tenant_id_str).unwrap_or_default(),
+                        workspace_id: Uuid::from_str(&workspace_id_str).unwrap_or_default(),
+                        tool_name,
+                        parameters,
+                        diff_preview: None,
+                        author_actor,
+                        status,
+                        approver_actor,
+                        decision,
+                    })
+                })
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            for row in rows {
+                out.push(row.map_err(|e| CheckpointError::DatabaseError(e.to_string()))?);
+            }
+        } else {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, run_id, tenant_id, workspace_id, tool_name, arguments_json, author_id, status, approver_actor, decision
+                     FROM approvals
+                     WHERE status = 'pending'
+                     ORDER BY created_at ASC",
+                )
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |r| {
+                    let id_str: String = r.get(0)?;
+                    let run_id_str: String = r.get(1)?;
+                    let tenant_id_str: String = r.get(2)?;
+                    let workspace_id_str: String = r.get(3)?;
+                    let tool_name: String = r.get(4)?;
+                    let args_str: String = r.get(5)?;
+                    let author_actor: String = r.get(6).unwrap_or_default();
+                    let status: String = r.get(7)?;
+                    let approver_actor: Option<String> = r.get(8)?;
+                    let decision: Option<String> = r.get(9)?;
+                    let parameters: serde_json::Value =
+                        serde_json::from_str(&args_str).unwrap_or(serde_json::Value::Null);
+                    Ok(ApprovalRequestSpec {
+                        id: Uuid::from_str(&id_str).unwrap_or_default(),
+                        run_id: Uuid::from_str(&run_id_str).unwrap_or_default(),
+                        tenant_id: Uuid::from_str(&tenant_id_str).unwrap_or_default(),
+                        workspace_id: Uuid::from_str(&workspace_id_str).unwrap_or_default(),
+                        tool_name,
+                        parameters,
+                        diff_preview: None,
+                        author_actor,
+                        status,
+                        approver_actor,
+                        decision,
+                    })
+                })
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            for row in rows {
+                out.push(row.map_err(|e| CheckpointError::DatabaseError(e.to_string()))?);
+            }
+        }
+        Ok(out)
     }
 }
 

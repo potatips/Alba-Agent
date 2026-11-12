@@ -21,6 +21,9 @@ sha2 = "0.10.8"
 thiserror = "2.0.11"
 similar = "2.7.0"
 ignore = "0.4.23"
+axum = "0.8.1"
+tower = "0.5.2"
+tower-http = { version = "0.6.2", features = ["cors"] }
 
 [dev-dependencies]
 tempfile = "3.17.1"

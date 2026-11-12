@@ -1,0 +1,69 @@
+use axum::extract::State;
+use axum::Json;
+use chrono::Utc;
+use serde::Serialize;
+
+use crate::server::auth::{
+    sign_token, AuthenticatedUser, LocalSessionClaims, DEFAULT_LOCAL_TENANT_ID,
+    DEFAULT_LOCAL_USER_DISPLAY_NAME, DEFAULT_LOCAL_USER_EMAIL, DEFAULT_LOCAL_USER_ID,
+    DEFAULT_LOCAL_USER_PLAN, DEFAULT_LOCAL_WORKSPACE_ID,
+};
+use crate::server::error::ApiError;
+use crate::server::state::AppState;
+
+#[derive(Serialize)]
+pub struct LocalModeResponse {
+    pub enabled: bool,
+}
+
+#[derive(Serialize)]
+pub struct LocalSessionResponse {
+    pub access_token: String,
+    pub tenant_id: String,
+    pub workspace_id: String,
+    pub expires_in: i64,
+}
+
+#[derive(Serialize)]
+pub struct MeResponse {
+    pub email: String,
+    pub display_name: String,
+    pub plan: String,
+}
+
+pub async fn local_mode_handler() -> Json<LocalModeResponse> {
+    Json(LocalModeResponse { enabled: true })
+}
+
+pub async fn local_session_handler(
+    State(state): State<AppState>,
+) -> Result<Json<LocalSessionResponse>, ApiError> {
+    let expires_in: i64 = 86400;
+    let exp = Utc::now().timestamp() + expires_in;
+    let claims = LocalSessionClaims {
+        sub: DEFAULT_LOCAL_USER_ID.to_string(),
+        tenant_id: DEFAULT_LOCAL_TENANT_ID.to_string(),
+        workspace_id: DEFAULT_LOCAL_WORKSPACE_ID.to_string(),
+        email: DEFAULT_LOCAL_USER_EMAIL.to_string(),
+        display_name: DEFAULT_LOCAL_USER_DISPLAY_NAME.to_string(),
+        plan: DEFAULT_LOCAL_USER_PLAN.to_string(),
+        exp,
+    };
+    let access_token = sign_token(&claims, &state.jwt_secret)?;
+    Ok(Json(LocalSessionResponse {
+        access_token,
+        tenant_id: claims.tenant_id,
+        workspace_id: claims.workspace_id,
+        expires_in,
+    }))
+}
+
+pub async fn me_handler(
+    AuthenticatedUser(claims): AuthenticatedUser,
+) -> Result<Json<MeResponse>, ApiError> {
+    Ok(Json(MeResponse {
+        email: claims.email,
+        display_name: claims.display_name,
+        plan: claims.plan,
+    }))
+}

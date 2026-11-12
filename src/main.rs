@@ -1,7 +1,7 @@
 use clap::Parser;
 use nexus_albaai::cli::commands::{
     handle_approve, handle_cancel, handle_deny, handle_fork, handle_resume, handle_run,
-    handle_status, Cli, Commands,
+    handle_serve, handle_status, Cli, Commands,
 };
 
 #[tokio::main]
@@ -16,5 +16,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Resume(args) => handle_resume(args).await,
         Commands::Cancel(args) => handle_cancel(args).await,
         Commands::Fork(args) => handle_fork(args).await,
+        Commands::Serve(args) => handle_serve(args).await,
     }
 }

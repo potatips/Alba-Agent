@@ -6,6 +6,7 @@ pub mod events;
 pub mod governance;
 pub mod models;
 pub mod sandbox;
+pub mod schema;
 pub mod tools;
 pub mod workflow;
 

@@ -246,3 +246,103 @@ async fn test_invalid_workflow_creation_returns_400() {
     let body: Value = res.json().await.unwrap();
     assert!(body["detail"].as_str().unwrap().contains("Start node"));
 }
+
+#[tokio::test]
+async fn test_contract_capsules_endpoint() {
+    let (base_url, _tmp) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let session_res = client
+        .post(format!("{}/api/v1/auth/local-session", base_url))
+        .send()
+        .await
+        .unwrap();
+    let token = session_res.json::<Value>().await.unwrap()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let res = client
+        .get(format!("{}/api/v1/learning-transfer/capsules", base_url))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), reqwest::StatusCode::OK);
+    let body: Vec<Value> = res.json().await.unwrap();
+    assert!(!body.is_empty());
+    assert!(body[0]["trigger_pattern"].is_string());
+}
+
+#[tokio::test]
+async fn test_contract_settings_endpoints() {
+    let (base_url, _tmp) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let session_res = client
+        .post(format!("{}/api/v1/auth/local-session", base_url))
+        .send()
+        .await
+        .unwrap();
+    let token = session_res.json::<Value>().await.unwrap()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let models_res = client
+        .get(format!("{}/api/v1/settings/chat-models", base_url))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(models_res.status(), reqwest::StatusCode::OK);
+    let models_body: Value = models_res.json().await.unwrap();
+    assert!(models_body["models"].is_array());
+
+    let policy_get = client
+        .get(format!("{}/api/v1/settings/execution", base_url))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(policy_get.status(), reqwest::StatusCode::OK);
+
+    let policy_put = client
+        .put(format!("{}/api/v1/settings/execution", base_url))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&serde_json::json!({
+            "default_mode": "ask_all",
+            "allowed_domains": ["api.openai.com"],
+            "denied_domains": ["untrusted.com"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(policy_put.status(), reqwest::StatusCode::OK);
+    let put_body: Value = policy_put.json().await.unwrap();
+    assert_eq!(put_body["default_mode"], "ask_all");
+}
+
+#[tokio::test]
+async fn test_contract_tools_builtin_endpoint() {
+    let (base_url, _tmp) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let session_res = client
+        .post(format!("{}/api/v1/auth/local-session", base_url))
+        .send()
+        .await
+        .unwrap();
+    let token = session_res.json::<Value>().await.unwrap()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let res = client
+        .get(format!("{}/api/v1/tools/builtin", base_url))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), reqwest::StatusCode::OK);
+    let tools: Vec<Value> = res.json().await.unwrap();
+    assert!(tools.iter().any(|t| t["id"] == "file_read"));
+    assert!(tools.iter().any(|t| t["id"] == "file_write"));
+}

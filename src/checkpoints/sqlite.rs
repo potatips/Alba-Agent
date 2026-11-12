@@ -142,6 +142,10 @@ pub struct SqliteCheckpointStore {
 }
 
 impl SqliteCheckpointStore {
+    pub fn connection(&self) -> Arc<Mutex<Connection>> {
+        self.conn.clone()
+    }
+
     fn ensure_private_db_file(path: &Path) -> Result<(), CheckpointError> {
         if path.as_os_str() == ":memory:" {
             return Ok(());
@@ -869,7 +873,7 @@ impl SqliteCheckpointStore {
         if let Some(r_id) = run_id {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, run_id, tenant_id, workspace_id, tool_name, arguments_json, author_id, status, approver_actor, decision
+                    "SELECT id, run_id, tenant_id, workspace_id, tool_name, action_description, author_id, status, decided_by
                      FROM approvals
                      WHERE run_id = ?1 AND status = 'pending'
                      ORDER BY created_at ASC",
@@ -882,13 +886,11 @@ impl SqliteCheckpointStore {
                     let tenant_id_str: String = r.get(2)?;
                     let workspace_id_str: String = r.get(3)?;
                     let tool_name: String = r.get(4)?;
-                    let args_str: String = r.get(5)?;
-                    let author_actor: String = r.get(6).unwrap_or_default();
+                    let action_desc: String = r.get(5)?;
+                    let author_actor: String = r.get::<_, Option<String>>(6)?.unwrap_or_default();
                     let status: String = r.get(7)?;
                     let approver_actor: Option<String> = r.get(8)?;
-                    let decision: Option<String> = r.get(9)?;
-                    let parameters: serde_json::Value =
-                        serde_json::from_str(&args_str).unwrap_or(serde_json::Value::Null);
+                    let parameters = serde_json::json!({ "action": action_desc });
                     Ok(ApprovalRequestSpec {
                         id: Uuid::from_str(&id_str).unwrap_or_default(),
                         run_id: Uuid::from_str(&run_id_str).unwrap_or_default(),
@@ -900,7 +902,7 @@ impl SqliteCheckpointStore {
                         author_actor,
                         status,
                         approver_actor,
-                        decision,
+                        decision: None,
                     })
                 })
                 .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
@@ -910,7 +912,7 @@ impl SqliteCheckpointStore {
         } else {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, run_id, tenant_id, workspace_id, tool_name, arguments_json, author_id, status, approver_actor, decision
+                    "SELECT id, run_id, tenant_id, workspace_id, tool_name, action_description, author_id, status, decided_by
                      FROM approvals
                      WHERE status = 'pending'
                      ORDER BY created_at ASC",
@@ -923,13 +925,11 @@ impl SqliteCheckpointStore {
                     let tenant_id_str: String = r.get(2)?;
                     let workspace_id_str: String = r.get(3)?;
                     let tool_name: String = r.get(4)?;
-                    let args_str: String = r.get(5)?;
-                    let author_actor: String = r.get(6).unwrap_or_default();
+                    let action_desc: String = r.get(5)?;
+                    let author_actor: String = r.get::<_, Option<String>>(6)?.unwrap_or_default();
                     let status: String = r.get(7)?;
                     let approver_actor: Option<String> = r.get(8)?;
-                    let decision: Option<String> = r.get(9)?;
-                    let parameters: serde_json::Value =
-                        serde_json::from_str(&args_str).unwrap_or(serde_json::Value::Null);
+                    let parameters = serde_json::json!({ "action": action_desc });
                     Ok(ApprovalRequestSpec {
                         id: Uuid::from_str(&id_str).unwrap_or_default(),
                         run_id: Uuid::from_str(&run_id_str).unwrap_or_default(),
@@ -941,7 +941,7 @@ impl SqliteCheckpointStore {
                         author_actor,
                         status,
                         approver_actor,
-                        decision,
+                        decision: None,
                     })
                 })
                 .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
@@ -950,6 +950,51 @@ impl SqliteCheckpointStore {
             }
         }
         Ok(out)
+    }
+
+    pub fn get_approval_details(
+        &self,
+        approval_id: &str,
+    ) -> Result<Option<(ExecutionScope, String, String)>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let res = conn
+            .query_row(
+                "SELECT tenant_id, workspace_id, run_id, author_id, status FROM approvals WHERE id = ?1",
+                params![approval_id],
+                |row| {
+                    let t_str: String = row.get(0)?;
+                    let w_str: String = row.get(1)?;
+                    let r_str: String = row.get(2)?;
+                    let author: String = row.get::<_, Option<String>>(3)?.unwrap_or_default();
+                    let status: String = row.get(4)?;
+                    Ok((t_str, w_str, r_str, author, status))
+                },
+            )
+            .optional()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        if let Some((t_str, w_str, r_str, author, status)) = res {
+            let tenant_id = Uuid::from_str(&t_str)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let workspace_id = Uuid::from_str(&w_str)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let run_id = Uuid::from_str(&r_str)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            Ok(Some((
+                ExecutionScope {
+                    tenant_id,
+                    workspace_id,
+                    run_id,
+                },
+                author,
+                status,
+            )))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn insert_run_event(&self, event: &RuntimeEvent) -> Result<(), CheckpointError> {

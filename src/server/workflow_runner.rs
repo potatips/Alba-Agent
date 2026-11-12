@@ -76,6 +76,30 @@ impl ModelClient for ServerModelClient {
     async fn complete(&self, request: &ModelRequest) -> Result<ModelResponse, ModelError> {
         if let Some(ref client) = self.openai_client {
             client.complete(request).await
+        } else if let Ok(mock_json) = std::env::var("ALBA_MOCK_TOOL_CALL") {
+            let has_tool_response = request
+                .messages
+                .iter()
+                .any(|m| m.role == crate::domain::MessageRole::Tool);
+            if has_tool_response {
+                Ok(ModelResponse {
+                    content: Some("Task finished with tool result".to_string()),
+                    tool_calls: vec![],
+                    usage: None,
+                })
+            } else if let Ok(tc) = serde_json::from_str::<crate::domain::ToolCall>(&mock_json) {
+                Ok(ModelResponse {
+                    content: None,
+                    tool_calls: vec![tc],
+                    usage: None,
+                })
+            } else {
+                Ok(ModelResponse {
+                    content: Some("Task executed successfully".to_string()),
+                    tool_calls: vec![],
+                    usage: None,
+                })
+            }
         } else {
             let content = "Task executed successfully by agent in workflow.";
             Ok(ModelResponse {

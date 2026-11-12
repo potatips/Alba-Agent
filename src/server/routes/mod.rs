@@ -1,5 +1,9 @@
+pub mod approvals;
 pub mod auth;
+pub mod capsules;
 pub mod health;
 pub mod runs;
+pub mod settings;
 pub mod sse;
+pub mod tools;
 pub mod workflows;

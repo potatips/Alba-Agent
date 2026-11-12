@@ -296,10 +296,14 @@ async fn test_router_max_loop_iterations_exceeded_fails() {
     };
 
     let scope = ExecutionScope::new(spec.tenant_id, spec.workspace_id, Uuid::new_v4()).unwrap();
-    let err = executor
-        .start_workflow(&spec, scope, None)
-        .await
-        .unwrap_err();
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        executor.start_workflow(&spec, scope, None),
+    )
+    .await
+    .expect("test timed out: router loop limit was not enforced");
+
+    let err = res.unwrap_err();
 
     match err {
         WorkflowExecutionError::LoopLimitExceeded(router_id, limit) => {

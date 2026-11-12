@@ -2188,6 +2188,7 @@ dependencies = [
  "chrono",
  "clap",
  "ignore",
+ "nexus-albaai",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",

@@ -390,6 +390,7 @@ where
         context: &mut WorkflowExecutionContext,
     ) -> Result<WorkflowOutcome, WorkflowExecutionError> {
         loop {
+            tokio::task::yield_now().await;
             if self.checkpoint_store.is_cancelled(&scope).await? {
                 context.run_state = WorkflowRunState::Cancelled;
                 context.sequence += 1;
@@ -778,6 +779,14 @@ where
                             .ok_or_else(|| ToolError::NotFound(tc.name.clone()))?;
 
                         let output = tool.execute(&scope, &tc.arguments).await?;
+
+                        #[cfg(feature = "failpoints")]
+                        if let Ok(fp) = std::env::var("ALBA_FAILPOINT") {
+                            if fp == "tool_after_side_effect_before_complete" {
+                                eprintln!("FAILPOINT:tool_after_side_effect_before_complete");
+                                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                            }
+                        }
 
                         self.checkpoint_store
                             .complete_tool_call(&scope, &crew_spec.id, &tc.id, &output)

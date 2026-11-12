@@ -174,7 +174,33 @@ where
         }
 
         self.save_checkpoint_step(scope, &context).await?;
-        self.execute_flow(spec, scope, &mut context).await
+        let flow_result = self.execute_flow(spec, scope, &mut context).await;
+        match flow_result {
+            Ok(outcome) => Ok(outcome),
+            Err(e) => {
+                context.run_state = WorkflowRunState::Failed;
+                context
+                    .node_states
+                    .insert(context.current_node_id.clone(), WorkflowNodeState::Failed);
+                context.error = Some(e.to_string());
+                context.sequence += 1;
+                context.updated_at = Utc::now();
+                let _ = self.save_checkpoint_step(scope, &context).await;
+                let _ = self.event_sink.emit(
+                    RuntimeEvent::new(
+                        scope,
+                        RuntimeEventType::FlowStateChanged,
+                        serde_json::json!({
+                            "node_id": context.current_node_id,
+                            "status": "failed",
+                            "error": e.to_string(),
+                        }),
+                    )
+                    .with_node(&context.current_node_id),
+                );
+                Err(e)
+            }
+        }
     }
 
     pub async fn resume_workflow(
@@ -353,7 +379,33 @@ where
             WorkflowRunState::Pending | WorkflowRunState::Running => {}
         }
 
-        self.execute_flow(spec, scope, &mut context).await
+        let flow_result = self.execute_flow(spec, scope, &mut context).await;
+        match flow_result {
+            Ok(outcome) => Ok(outcome),
+            Err(e) => {
+                context.run_state = WorkflowRunState::Failed;
+                context
+                    .node_states
+                    .insert(context.current_node_id.clone(), WorkflowNodeState::Failed);
+                context.error = Some(e.to_string());
+                context.sequence += 1;
+                context.updated_at = Utc::now();
+                let _ = self.save_checkpoint_step(scope, &context).await;
+                let _ = self.event_sink.emit(
+                    RuntimeEvent::new(
+                        scope,
+                        RuntimeEventType::FlowStateChanged,
+                        serde_json::json!({
+                            "node_id": context.current_node_id,
+                            "status": "failed",
+                            "error": e.to_string(),
+                        }),
+                    )
+                    .with_node(&context.current_node_id),
+                );
+                Err(e)
+            }
+        }
     }
 
     pub async fn fork_workflow(
@@ -723,6 +775,17 @@ where
                 let final_text = response
                     .content
                     .unwrap_or_else(|| "Task completed without text content".to_string());
+
+                let claims_hook = crate::verification::claims::ClaimsHook::new();
+                claims_hook
+                    .verify_text_claims(&self.workspace_root, &final_text)
+                    .map_err(|e| {
+                        WorkflowExecutionError::ExecutionFailed(format!(
+                            "Claims hook validation failed for task '{}': {}",
+                            task.id, e
+                        ))
+                    })?;
+
                 context.task_outputs.insert(task.id.clone(), final_text);
                 break;
             }

@@ -26,6 +26,9 @@ pub fn generate_seatbelt_profile(canonical_ws: &Path, policy: &SandboxPolicy) ->
          (allow sysctl-read)\n\
          (allow mach-lookup)\n\
          (allow signal (target self))\n\
+         (allow file-read-metadata)\n\
+         (allow file-ioctl)\n\
+         (allow ipc-posix-shm*)\n\
          (allow file-read*\n\
            (subpath \"/usr\")\n\
            (subpath \"/bin\")\n\
@@ -33,13 +36,26 @@ pub fn generate_seatbelt_profile(canonical_ws: &Path, policy: &SandboxPolicy) ->
            (subpath \"/System\")\n\
            (subpath \"/Library\")\n\
            (subpath \"/private/var/db\")\n\
+           (subpath \"/private/etc\")\n\
+           (subpath \"/etc\")\n\
+           (subpath \"/private/var\")\n\
+           (subpath \"/var\")\n\
            (subpath \"/dev\")\n\
-           (literal \"/private/etc/resolv.conf\"))\n\
-         (allow file-read* file-write*\n\
+           (subpath \"{ws}\"))\n\
+         (deny mach-lookup (global-name \"com.apple.SecurityServer\") (global-name \"com.apple.securityd.xpc\"))\n\
+         (allow file-write*\n\
            (subpath \"{ws}\")\n\
-           (subpath \"/private/tmp\")\n\
            (literal \"/dev/null\")\n\
-           (literal \"/dev/zero\"))\n\
+           (literal \"/dev/zero\")\n\
+           (literal \"/dev/tty\")\n\
+           (literal \"/dev/dtracehelper\"))\n\
+         (deny file-read-data (regex #\"/\\.ssh(/|$)\"))\n\
+         (deny file-read-data (regex #\"/\\.aws(/|$)\"))\n\
+         (deny file-read-data (regex #\"/\\.gnupg(/|$)\"))\n\
+         (deny file-read-data (regex #\"/\\.kube(/|$)\"))\n\
+         (deny file-read-data (regex #\"/Library/Keychains(/|$)\"))\n\
+         (deny file-read-data (regex #\"/\\.env(\\.[^/]*)?$\"))\n\
+         (allow file-read-data (regex #\"/\\.env\\.(example|sample|template)$\"))\n\
          {network_rule}\n",
         ws = ws,
         network_rule = network_rule,

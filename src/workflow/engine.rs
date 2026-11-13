@@ -598,6 +598,39 @@ where
             }
         }
 
+        if !crew_spec.expected_artifact_paths.is_empty() {
+            let validator = crate::verification::validator::ArtifactContractHook::new();
+            let crew_map: Option<serde_json::Map<String, serde_json::Value>> = context
+                .task_outputs
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect::<serde_json::Map<String, serde_json::Value>>()
+                .into();
+            let report = validator.validate_node_artifacts(
+                &self.workspace_root,
+                &crew_spec.id,
+                &crew_spec.expected_artifact_paths,
+                crew_map.as_ref(),
+                None,
+            );
+            if !report.passed() {
+                let failure_reasons: Vec<String> = report
+                    .checks
+                    .iter()
+                    .filter(|c| {
+                        c.status != crate::verification::validator::CheckStatus::Verified
+                            && c.status != crate::verification::validator::CheckStatus::Recovered
+                    })
+                    .map(|c| format!("{}: {:?}", c.path, c.reason))
+                    .collect();
+                return Err(WorkflowExecutionError::ExecutionFailed(format!(
+                    "Artifact contract validation failed for crew node '{}': {}",
+                    crew_spec.id,
+                    failure_reasons.join(", ")
+                )));
+            }
+        }
+
         context
             .node_states
             .insert(crew_spec.id.clone(), WorkflowNodeState::Completed);
@@ -785,6 +818,37 @@ where
                             task.id, e
                         ))
                     })?;
+
+                if !task.expected_artifact_paths.is_empty() {
+                    let validator = crate::verification::validator::ArtifactContractHook::new();
+                    let structured = serde_json::from_str::<serde_json::Value>(&final_text)
+                        .ok()
+                        .and_then(|v| v.as_object().cloned());
+                    let report = validator.validate_node_artifacts(
+                        &self.workspace_root,
+                        &task.id,
+                        &task.expected_artifact_paths,
+                        structured.as_ref(),
+                        None,
+                    );
+                    if !report.passed() {
+                        let failure_reasons: Vec<String> = report
+                            .checks
+                            .iter()
+                            .filter(|c| {
+                                c.status != crate::verification::validator::CheckStatus::Verified
+                                    && c.status
+                                        != crate::verification::validator::CheckStatus::Recovered
+                            })
+                            .map(|c| format!("{}: {:?}", c.path, c.reason))
+                            .collect();
+                        return Err(WorkflowExecutionError::ExecutionFailed(format!(
+                            "Artifact contract validation failed for task '{}': {}",
+                            task.id,
+                            failure_reasons.join(", ")
+                        )));
+                    }
+                }
 
                 context.task_outputs.insert(task.id.clone(), final_text);
                 break;

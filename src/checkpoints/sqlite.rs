@@ -503,6 +503,7 @@ impl SqliteCheckpointStore {
                     duration_ms INTEGER NOT NULL,
                     verified INTEGER NOT NULL,
                     created_at TEXT NOT NULL,
+                    output_sha256 TEXT NOT NULL DEFAULT '',
                     FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_run_evidence_run ON run_evidence(run_id);
@@ -510,6 +511,29 @@ impl SqliteCheckpointStore {
                 INSERT INTO schema_migrations (version, applied_at)
                 VALUES (7, datetime('now'));
                 ",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        }
+
+        if current_version < 8 {
+            let has_col: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('run_evidence') WHERE name = 'output_sha256'",
+                    [],
+                    |r| r.get::<_, i64>(0).map(|c| c > 0),
+                )
+                .unwrap_or(false);
+
+            if !has_col {
+                let _ = conn.execute(
+                    "ALTER TABLE run_evidence ADD COLUMN output_sha256 TEXT NOT NULL DEFAULT ''",
+                    [],
+                );
+            }
+
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (8, datetime('now'))",
+                [],
             )
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
         }
@@ -758,10 +782,11 @@ impl SqliteCheckpointStore {
 
         let effective_verified = record.verified && (record.exit_code == 0);
         let verified_int = if effective_verified { 1 } else { 0 };
+        let output_hash = record.output_sha256();
 
         conn.execute(
-            "INSERT INTO run_evidence (id, run_id, command, exit_code, stdout, stderr, duration_ms, verified, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO run_evidence (id, run_id, command, exit_code, stdout, stderr, duration_ms, verified, created_at, output_sha256)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 record.id,
                 record.run_id,
@@ -772,11 +797,12 @@ impl SqliteCheckpointStore {
                 record.duration_ms,
                 verified_int,
                 record.created_at,
+                output_hash,
             ],
         )
         .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
 
-        if record.exit_code != 0 {
+        if record.exit_code != 0 || !record.verified {
             let _ = conn.execute(
                 "UPDATE runs SET verified = 0, updated_at = ?2 WHERE id = ?1",
                 params![record.run_id, Utc::now().to_rfc3339()],
@@ -833,15 +859,15 @@ impl SqliteCheckpointStore {
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
 
         if verified {
-            let non_zero_count: i64 = conn
+            let unverified_count: i64 = conn
                 .query_row(
-                    "SELECT COUNT(*) FROM run_evidence WHERE run_id = ?1 AND exit_code != 0",
+                    "SELECT COUNT(*) FROM run_evidence WHERE run_id = ?1 AND (exit_code != 0 OR verified = 0)",
                     params![run_id],
                     |r| r.get(0),
                 )
                 .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
 
-            if non_zero_count > 0 {
+            if unverified_count > 0 {
                 conn.execute(
                     "UPDATE runs SET verified = 0, updated_at = ?2 WHERE id = ?1",
                     params![run_id, Utc::now().to_rfc3339()],
@@ -859,6 +885,18 @@ impl SqliteCheckpointStore {
                 .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
 
             if evidence_count == 0 {
+                return Ok(false);
+            }
+
+            let unverified_artifacts: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM artifacts WHERE run_id = ?1 AND verified = 0",
+                    params![run_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+            if unverified_artifacts > 0 {
                 return Ok(false);
             }
         }
@@ -889,6 +927,68 @@ impl SqliteCheckpointStore {
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?
             .unwrap_or(0);
         Ok(verified == 1)
+    }
+
+    pub fn get_run_evidence_output_hash(
+        &self,
+        evidence_id: &str,
+    ) -> Result<Option<String>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        conn.query_row(
+            "SELECT output_sha256 FROM run_evidence WHERE id = ?1",
+            params![evidence_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| CheckpointError::DatabaseError(e.to_string()))
+    }
+
+    pub fn check_artifact_tampering(
+        &self,
+        workspace_root: &std::path::Path,
+        run_id: &str,
+    ) -> Result<bool, CheckpointError> {
+        let artifacts = self.list_artifacts(run_id)?;
+        if artifacts.is_empty() {
+            return Ok(false);
+        }
+
+        use sha2::{Digest, Sha256};
+        for art in &artifacts {
+            let path = workspace_root.join(&art.filename);
+            let target = if path.exists() {
+                path
+            } else {
+                workspace_root.join(&art.file_path)
+            };
+
+            if !target.exists() {
+                let _ = self.mark_run_verified(run_id, false);
+                return Ok(true);
+            }
+
+            let data = match std::fs::read(&target) {
+                Ok(d) => d,
+                Err(_) => {
+                    let _ = self.mark_run_verified(run_id, false);
+                    return Ok(true);
+                }
+            };
+
+            let mut hasher = Sha256::new();
+            hasher.update(&data);
+            let current_hash = format!("{:x}", hasher.finalize());
+
+            if current_hash != art.sha256 {
+                let _ = self.mark_run_verified(run_id, false);
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     pub fn insert_artifact(&self, artifact: &ArtifactRecord) -> Result<(), CheckpointError> {

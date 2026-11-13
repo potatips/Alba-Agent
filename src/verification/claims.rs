@@ -136,15 +136,47 @@ pub fn extract_claimed_files(text: &str) -> Vec<String> {
         "deliverable:",
         "artifact:",
         "file:",
+        "wrote",
+        "created",
     ];
+
+    let skip_tokens = ["a", "an", "the", "new", "file", "to", "out", "into"];
+
+    let is_negated = |prefix: &str| {
+        let p = prefix.trim();
+        p.ends_with("not")
+            || p.ends_with("didn't")
+            || p.ends_with("did not")
+            || p.ends_with("cannot")
+            || p.ends_with("can't")
+            || p.ends_with("could not")
+            || p.ends_with("couldn't")
+            || p.ends_with("failed to")
+            || p.ends_with("fail to")
+            || p.ends_with("unable to")
+            || p.ends_with("never")
+            || p.ends_with("to")
+            || p.starts_with("please")
+            || p.contains("instead of")
+            || p.contains("without")
+    };
 
     for line in text.lines() {
         let line_lower = line.to_lowercase();
 
         for verb in &claim_verbs {
             if let Some(pos) = line_lower.find(verb) {
+                let prefix = &line_lower[..pos];
+                if is_negated(prefix) {
+                    continue;
+                }
                 let remainder = &line[pos + verb.len()..];
                 for token in remainder.split_whitespace() {
+                    let lower_t = token.to_lowercase();
+                    let cleaned_t = clean_path_token(&lower_t);
+                    if skip_tokens.contains(&cleaned_t.as_str()) {
+                        continue;
+                    }
                     let cleaned = clean_path_token(token);
                     if looks_like_file_path(&cleaned) && seen.insert(cleaned.clone()) {
                         claims.push(cleaned);

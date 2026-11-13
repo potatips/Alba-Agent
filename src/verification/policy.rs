@@ -2,6 +2,7 @@ use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
 
+use crate::checkpoints::types::ExecutionPolicyRecord;
 use crate::tools::path_guard::is_sensitive_component;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +36,16 @@ impl Default for ExecutionPolicyConfig {
     }
 }
 
+impl From<&ExecutionPolicyRecord> for ExecutionPolicyConfig {
+    fn from(rec: &ExecutionPolicyRecord) -> Self {
+        Self {
+            strict_mode: rec.default_mode.eq_ignore_ascii_case("strict"),
+            allowed_domains: rec.allowed_domains.clone(),
+            denied_domains: rec.denied_domains.clone(),
+        }
+    }
+}
+
 pub struct ExecutionPolicyEngine {
     config: ExecutionPolicyConfig,
 }
@@ -48,6 +59,10 @@ impl Default for ExecutionPolicyEngine {
 impl ExecutionPolicyEngine {
     pub fn new(config: ExecutionPolicyConfig) -> Self {
         Self { config }
+    }
+
+    pub fn from_record(record: &ExecutionPolicyRecord) -> Self {
+        Self::new(ExecutionPolicyConfig::from(record))
     }
 
     pub fn set_strict_mode(&mut self, strict: bool) {
@@ -241,6 +256,10 @@ impl ExecutionPolicyEngine {
             "pkill",
             "kill -9",
             "killall",
+            "crontab",
+            "cron",
+            "core.hookspath",
+            "hookspath",
         ];
 
         for kw in &ask_keywords {

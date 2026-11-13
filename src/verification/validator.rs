@@ -4,6 +4,8 @@ use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
 
+use crate::tools::path_guard::resolve_writable_file;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CheckStatus {
@@ -473,16 +475,32 @@ impl ArtifactContractHook {
         let mut checks = Vec::new();
 
         for rel in declared_paths {
-            let target_path = workspace_root.join(rel);
+            let safe_target = match resolve_writable_file(workspace_root, rel) {
+                Ok((_, target, _)) => target,
+                Err(_) => {
+                    let reason = if rel.contains("..") {
+                        "Parent traversal '..' is forbidden".to_string()
+                    } else {
+                        "Symlink escapes workspace root".to_string()
+                    };
+                    checks.push(ArtifactCheck {
+                        path: rel.clone(),
+                        status: CheckStatus::Invalid,
+                        reason,
+                        size_bytes: 0,
+                    });
+                    continue;
+                }
+            };
 
-            if !target_path.is_file() {
+            if !safe_target.is_file() {
                 if let Some(src_map) = sources {
                     if let Some(data) = src_map.get(rel) {
                         if !data.is_empty() {
-                            if let Some(parent) = target_path.parent() {
+                            if let Some(parent) = safe_target.parent() {
                                 let _ = fs::create_dir_all(parent);
                             }
-                            let _ = fs::write(&target_path, data);
+                            let _ = fs::write(&safe_target, data);
                         }
                     }
                 }
@@ -501,10 +519,10 @@ impl ArtifactContractHook {
                     if let Some(output) = structured_output {
                         let content = render_document(rel, output);
                         if !content.trim().is_empty() && content.len() <= 512_000 {
-                            if let Some(parent) = target_path.parent() {
+                            if let Some(parent) = safe_target.parent() {
                                 let _ = fs::create_dir_all(parent);
                             }
-                            if fs::write(&target_path, content.as_bytes()).is_ok() {
+                            if fs::write(&safe_target, content.as_bytes()).is_ok() {
                                 let re_check = self.validate_file(workspace_root, rel);
                                 if re_check.status == CheckStatus::Verified {
                                     check = ArtifactCheck {

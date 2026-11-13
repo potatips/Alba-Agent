@@ -12,7 +12,7 @@ use crate::models::types::{ModelConfig, ModelError, ModelRequest, ModelResponse}
 use crate::models::{ModelClient, OpenAiCompatibleClient};
 use crate::schema::WorkflowSpec;
 use crate::server::state::AppState;
-use crate::tools::register_workspace_tools;
+use crate::tools::register_workspace_tools_with_audit;
 use crate::tools::types::ToolRegistry;
 use crate::workflow::engine::{WorkflowExecutor, WorkflowOutcome};
 
@@ -125,10 +125,11 @@ pub async fn run_workflow_background(
     let model = Arc::new(state.model.clone().unwrap_or_default());
     let policy = Arc::new(DefaultApprovalPolicy::new().with_workspace_root(&state.workspace_root));
     let mut registry = ToolRegistry::new();
-    register_workspace_tools(
+    register_workspace_tools_with_audit(
         &mut registry,
         &state.workspace_root,
         Some(Arc::clone(&event_sink) as Arc<dyn EventSink>),
+        Some(state.store.clone()),
     );
 
     let executor = WorkflowExecutor::new(
@@ -175,10 +176,11 @@ pub async fn resume_workflow_background(
     let model = Arc::new(state.model.clone().unwrap_or_default());
     let policy = Arc::new(DefaultApprovalPolicy::new().with_workspace_root(&state.workspace_root));
     let mut registry = ToolRegistry::new();
-    register_workspace_tools(
+    register_workspace_tools_with_audit(
         &mut registry,
         &state.workspace_root,
         Some(Arc::clone(&event_sink) as Arc<dyn EventSink>),
+        Some(state.store.clone()),
     );
 
     let executor = WorkflowExecutor::new(

@@ -13,6 +13,7 @@ use crate::events::sink::EventSink;
 use crate::events::types::{RuntimeEvent, RuntimeEventType};
 use crate::sandbox::{SandboxBackendKind, SandboxPolicy, SandboxRunner, SandboxStreamChunk};
 use crate::tools::types::{BoxFuture, Tool, ToolDefinition, ToolError};
+use crate::verification::policy::{ExecutionPolicyEngine, PolicyDecision};
 
 #[derive(Clone)]
 pub struct RunCommandTool {
@@ -20,6 +21,7 @@ pub struct RunCommandTool {
     event_sink: Option<Arc<dyn EventSink>>,
     backend: SandboxBackendKind,
     audit_store: Option<Arc<SqliteCheckpointStore>>,
+    policy_engine: Option<Arc<ExecutionPolicyEngine>>,
 }
 
 impl RunCommandTool {
@@ -29,6 +31,7 @@ impl RunCommandTool {
             event_sink: None,
             backend: SandboxBackendKind::Auto,
             audit_store: None,
+            policy_engine: None,
         }
     }
 
@@ -44,6 +47,11 @@ impl RunCommandTool {
 
     pub fn with_audit_store(mut self, audit_store: Arc<SqliteCheckpointStore>) -> Self {
         self.audit_store = Some(audit_store);
+        self
+    }
+
+    pub fn with_policy_engine(mut self, policy_engine: Arc<ExecutionPolicyEngine>) -> Self {
+        self.policy_engine = Some(policy_engine);
         self
     }
 }
@@ -101,6 +109,45 @@ impl Tool for RunCommandTool {
 
             let timeout_secs = args.timeout_secs.unwrap_or(30).clamp(1, 300);
 
+            let full_cmd = if args.args.is_empty() {
+                args.program.clone()
+            } else {
+                format!("{} {}", args.program, args.args.join(" "))
+            };
+
+            let engine = self.policy_engine.clone().unwrap_or_else(|| {
+                if let Some(ref store) = self.audit_store {
+                    if let Ok(rec) = store.get_execution_policy() {
+                        return Arc::new(ExecutionPolicyEngine::from_record(&rec));
+                    }
+                }
+                Arc::new(ExecutionPolicyEngine::default())
+            });
+
+            let decision = engine.evaluate_command(&full_cmd);
+            if decision == PolicyDecision::Deny {
+                if let Some(ref store) = self.audit_store {
+                    let _ = store
+                        .record_audit_log(&AuditLogEntry {
+                            id: Uuid::new_v4(),
+                            scope: *scope,
+                            actor_id: None,
+                            action: "sandbox.command_blocked".to_string(),
+                            target_id: None,
+                            details: serde_json::json!({
+                                "program": args.program,
+                                "args": args.args,
+                                "reason": "Command execution denied by execution policy",
+                            }),
+                            created_at: chrono::Utc::now(),
+                        })
+                        .await;
+                }
+                return Err(ToolError::AccessDenied(
+                    "Command execution is blocked by execution policy".to_string(),
+                ));
+            }
+
             let is_network_call = args.program == "curl"
                 || args.program == "wget"
                 || args
@@ -108,27 +155,58 @@ impl Tool for RunCommandTool {
                     .iter()
                     .any(|a| a.starts_with("http://") || a.starts_with("https://"));
 
-            if is_network_call && !args.allow_network {
-                if let Some(ref store) = self.audit_store {
-                    let _ = store
-                        .record_audit_log(&AuditLogEntry {
-                            id: Uuid::new_v4(),
-                            scope: *scope,
-                            actor_id: None,
-                            action: "sandbox.network_blocked".to_string(),
-                            target_id: None,
-                            details: serde_json::json!({
-                                "program": args.program,
-                                "args": args.args,
-                                "reason": "Network access blocked by default sandbox policy",
-                            }),
-                            created_at: chrono::Utc::now(),
-                        })
-                        .await;
+            if is_network_call {
+                for arg in &args.args {
+                    if (arg.starts_with("http://") || arg.starts_with("https://"))
+                        && engine.evaluate_network(arg) == PolicyDecision::Deny
+                    {
+                        if let Some(ref store) = self.audit_store {
+                            let _ = store
+                                .record_audit_log(&AuditLogEntry {
+                                    id: Uuid::new_v4(),
+                                    scope: *scope,
+                                    actor_id: None,
+                                    action: "sandbox.network_blocked".to_string(),
+                                    target_id: None,
+                                    details: serde_json::json!({
+                                        "program": args.program,
+                                        "args": args.args,
+                                        "target": arg,
+                                        "reason": "Target domain denied by execution policy",
+                                    }),
+                                    created_at: chrono::Utc::now(),
+                                })
+                                .await;
+                        }
+                        return Err(ToolError::AccessDenied(format!(
+                            "Network access to '{}' is blocked by execution policy",
+                            arg
+                        )));
+                    }
                 }
-                return Err(ToolError::AccessDenied(
-                    "Outbound network access is blocked by sandbox policy".to_string(),
-                ));
+
+                if !args.allow_network {
+                    if let Some(ref store) = self.audit_store {
+                        let _ = store
+                            .record_audit_log(&AuditLogEntry {
+                                id: Uuid::new_v4(),
+                                scope: *scope,
+                                actor_id: None,
+                                action: "sandbox.network_blocked".to_string(),
+                                target_id: None,
+                                details: serde_json::json!({
+                                    "program": args.program,
+                                    "args": args.args,
+                                    "reason": "Network access blocked by default sandbox policy",
+                                }),
+                                created_at: chrono::Utc::now(),
+                            })
+                            .await;
+                    }
+                    return Err(ToolError::AccessDenied(
+                        "Outbound network access is blocked by sandbox policy".to_string(),
+                    ));
+                }
             }
 
             let policy = SandboxPolicy::new(&self.workspace_root)
@@ -162,6 +240,27 @@ impl Tool for RunCommandTool {
                 .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
             let _ = forwarder.await;
+
+            if output.exit_code != 0 {
+                if let Some(ref store) = self.audit_store {
+                    let _ = store
+                        .record_audit_log(&AuditLogEntry {
+                            id: Uuid::new_v4(),
+                            scope: *scope,
+                            actor_id: None,
+                            action: "sandbox.execution_denied".to_string(),
+                            target_id: None,
+                            details: serde_json::json!({
+                                "program": args.program,
+                                "args": args.args,
+                                "exit_code": output.exit_code,
+                                "stderr": output.stderr,
+                            }),
+                            created_at: chrono::Utc::now(),
+                        })
+                        .await;
+                }
+            }
 
             serde_json::to_string(&output).map_err(|e| {
                 ToolError::ExecutionFailed(format!("Failed serializing sandbox output: {}", e))

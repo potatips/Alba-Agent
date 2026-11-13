@@ -105,6 +105,16 @@ pub struct RunEvidenceRecord {
     pub created_at: String,
 }
 
+impl RunEvidenceRecord {
+    pub fn output_sha256(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(self.stdout.as_bytes());
+        hasher.update(self.stderr.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactRecord {
     pub id: String,

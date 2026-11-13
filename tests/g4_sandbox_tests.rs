@@ -5,7 +5,9 @@ use nexus_albaai::checkpoints::sqlite::SqliteCheckpointStore;
 use nexus_albaai::checkpoints::store::CheckpointStore;
 use nexus_albaai::domain::ExecutionScope;
 use nexus_albaai::sandbox::macos::{execute_macos, generate_seatbelt_profile};
-use nexus_albaai::sandbox::types::{SandboxError, SandboxPolicy};
+#[cfg(not(target_os = "macos"))]
+use nexus_albaai::sandbox::types::SandboxError;
+use nexus_albaai::sandbox::types::SandboxPolicy;
 use nexus_albaai::tools::dir_list::scan_directory;
 use nexus_albaai::tools::file_read::ReadFileTool;
 use nexus_albaai::tools::file_write::WriteFileTool;

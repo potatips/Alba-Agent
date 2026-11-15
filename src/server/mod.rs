@@ -92,6 +92,10 @@ pub fn create_app(state: AppState) -> Router {
             "/api/v1/settings/execution",
             get(get_execution_policy_handler).put(update_execution_policy_handler),
         )
+        .route(
+            "/api/v1/settings/execution-policy",
+            get(get_execution_policy_handler).put(update_execution_policy_handler),
+        )
         .route("/api/v1/tools/builtin", get(list_builtin_tools_handler))
         .route("/api/v1/skills", get(list_skills_handler))
         .fallback(fallback_404)

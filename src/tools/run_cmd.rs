@@ -54,6 +54,22 @@ impl RunCommandTool {
         self.policy_engine = Some(policy_engine);
         self
     }
+
+    pub fn evaluate_command(&self, cmd: &str) -> PolicyDecision {
+        let engine = self.policy_engine.clone().unwrap_or_else(|| {
+            if let Some(ref store) = self.audit_store {
+                if let Ok(rec) = store.get_execution_policy() {
+                    return Arc::new(ExecutionPolicyEngine::from_record(&rec));
+                }
+            }
+            Arc::new(ExecutionPolicyEngine::default())
+        });
+        engine.evaluate_command(cmd)
+    }
+
+    pub fn check_policy(&self, cmd: &str) -> PolicyDecision {
+        self.evaluate_command(cmd)
+    }
 }
 
 #[derive(Deserialize)]
@@ -97,6 +113,21 @@ impl Tool for RunCommandTool {
         }
     }
 
+    fn check_policy(&self, arguments: &serde_json::Value) -> Option<PolicyDecision> {
+        let program = arguments.get("program")?.as_str()?;
+        let args: Vec<&str> = arguments
+            .get("args")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        let full = if args.is_empty() {
+            program.to_string()
+        } else {
+            format!("{} {}", program, args.join(" "))
+        };
+        Some(self.evaluate_command(&full))
+    }
+
     fn execute<'a>(
         &'a self,
         scope: &'a ExecutionScope,
@@ -123,30 +154,6 @@ impl Tool for RunCommandTool {
                 }
                 Arc::new(ExecutionPolicyEngine::default())
             });
-
-            let decision = engine.evaluate_command(&full_cmd);
-            if decision == PolicyDecision::Deny {
-                if let Some(ref store) = self.audit_store {
-                    let _ = store
-                        .record_audit_log(&AuditLogEntry {
-                            id: Uuid::new_v4(),
-                            scope: *scope,
-                            actor_id: None,
-                            action: "sandbox.command_blocked".to_string(),
-                            target_id: None,
-                            details: serde_json::json!({
-                                "program": args.program,
-                                "args": args.args,
-                                "reason": "Command execution denied by execution policy",
-                            }),
-                            created_at: chrono::Utc::now(),
-                        })
-                        .await;
-                }
-                return Err(ToolError::AccessDenied(
-                    "Command execution is blocked by execution policy".to_string(),
-                ));
-            }
 
             let is_network_call = args.program == "curl"
                 || args.program == "wget"
@@ -207,6 +214,30 @@ impl Tool for RunCommandTool {
                         "Outbound network access is blocked by sandbox policy".to_string(),
                     ));
                 }
+            }
+
+            let decision = engine.evaluate_command(&full_cmd);
+            if decision == PolicyDecision::Deny {
+                if let Some(ref store) = self.audit_store {
+                    let _ = store
+                        .record_audit_log(&AuditLogEntry {
+                            id: Uuid::new_v4(),
+                            scope: *scope,
+                            actor_id: None,
+                            action: "sandbox.command_blocked".to_string(),
+                            target_id: None,
+                            details: serde_json::json!({
+                                "program": args.program,
+                                "args": args.args,
+                                "reason": "Command execution denied by execution policy",
+                            }),
+                            created_at: chrono::Utc::now(),
+                        })
+                        .await;
+                }
+                return Err(ToolError::AccessDenied(
+                    "Command execution is blocked by execution policy".to_string(),
+                ));
             }
 
             let policy = SandboxPolicy::new(&self.workspace_root)

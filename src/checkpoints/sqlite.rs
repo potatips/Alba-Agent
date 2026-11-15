@@ -3224,4 +3224,8 @@ impl CheckpointStore for SqliteCheckpointStore {
     async fn mark_verified(&self, run_id: &str, verified: bool) -> Result<bool, CheckpointError> {
         self.mark_run_verified(run_id, verified)
     }
+
+    async fn get_execution_policy(&self) -> Result<ExecutionPolicyRecord, CheckpointError> {
+        self.get_execution_policy()
+    }
 }

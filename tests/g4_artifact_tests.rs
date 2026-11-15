@@ -238,3 +238,86 @@ fn test_artifact_sources_materialization() {
     let on_disk = fs::read_to_string(ws.join("generated/exported.txt")).expect("read exported");
     assert_eq!(on_disk, "data from computer sandbox export");
 }
+
+#[test]
+fn test_gzip_signature_valid_and_wrong_bytes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let ws = temp.path();
+
+    let valid_gz = ws.join("archive.gz");
+    let mut gz_bytes = vec![0x1f, 0x8b, 0x08, 0x00];
+    gz_bytes.extend_from_slice(b"content");
+    fs::write(&valid_gz, &gz_bytes).expect("write");
+
+    let invalid_gz = ws.join("bad.gz");
+    fs::write(&invalid_gz, b"not a real gzip header").expect("write");
+
+    let hook = ArtifactContractHook::new();
+    let check_valid = hook.validate_file(ws, "archive.gz");
+    assert_eq!(check_valid.status, CheckStatus::Verified);
+
+    let check_invalid = hook.validate_file(ws, "bad.gz");
+    assert_eq!(check_invalid.status, CheckStatus::Invalid);
+    assert!(check_invalid.reason.contains("not a valid .gz container"));
+}
+
+#[test]
+fn test_tar_signature_valid_and_wrong_bytes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let ws = temp.path();
+
+    let valid_tar = ws.join("archive.tar");
+    let mut tar_bytes = vec![0u8; 512];
+    tar_bytes[257..262].copy_from_slice(b"ustar");
+    fs::write(&valid_tar, &tar_bytes).expect("write");
+
+    let invalid_tar = ws.join("bad.tar");
+    let bad_bytes = vec![0u8; 512];
+    fs::write(&invalid_tar, &bad_bytes).expect("write");
+
+    let hook = ArtifactContractHook::new();
+    let check_valid = hook.validate_file(ws, "archive.tar");
+    assert_eq!(check_valid.status, CheckStatus::Verified);
+
+    let check_invalid = hook.validate_file(ws, "bad.tar");
+    assert_eq!(check_invalid.status, CheckStatus::Invalid);
+    assert!(check_invalid.reason.contains("not a valid .tar container"));
+}
+
+#[test]
+fn test_sqlite_signature_valid_and_wrong_bytes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let ws = temp.path();
+
+    let valid_db = ws.join("data.db");
+    let mut db_bytes = b"SQLite format 3\0".to_vec();
+    db_bytes.extend_from_slice(&[0u8; 84]);
+    fs::write(&valid_db, &db_bytes).expect("write");
+
+    let invalid_db = ws.join("bad.sqlite");
+    fs::write(&invalid_db, b"not a sqlite file header").expect("write");
+
+    let hook = ArtifactContractHook::new();
+    let check_valid = hook.validate_file(ws, "data.db");
+    assert_eq!(check_valid.status, CheckStatus::Verified);
+
+    let check_invalid = hook.validate_file(ws, "bad.sqlite");
+    assert_eq!(check_invalid.status, CheckStatus::Invalid);
+    assert!(check_invalid
+        .reason
+        .contains("not a valid .sqlite container"));
+}
+
+#[test]
+fn test_unknown_binary_extension_rejected() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let ws = temp.path();
+
+    let unknown_bin = ws.join("payload.bin");
+    fs::write(&unknown_bin, b"\x01\x02\x03\x04\x05\x06").expect("write");
+
+    let hook = ArtifactContractHook::new();
+    let check = hook.validate_file(ws, "payload.bin");
+    assert_eq!(check.status, CheckStatus::Invalid);
+    assert!(check.reason.contains("not a valid .bin container"));
+}

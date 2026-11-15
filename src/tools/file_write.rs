@@ -18,6 +18,7 @@ use crate::events::sink::EventSink;
 use crate::events::types::{RuntimeEvent, RuntimeEventType};
 use crate::tools::path_guard::{resolve_writable_file, MAX_TEXT_BYTES};
 use crate::tools::types::{BoxFuture, Tool, ToolDefinition, ToolError};
+use crate::verification::policy::{ExecutionPolicyEngine, PolicyDecision};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteDiffPreview {
@@ -80,6 +81,7 @@ pub struct WriteFileTool {
     workspace_root: PathBuf,
     event_sink: Option<Arc<dyn EventSink>>,
     audit_store: Option<Arc<SqliteCheckpointStore>>,
+    policy_engine: Option<Arc<ExecutionPolicyEngine>>,
 }
 
 impl WriteFileTool {
@@ -88,6 +90,7 @@ impl WriteFileTool {
             workspace_root: workspace_root.into(),
             event_sink: None,
             audit_store: None,
+            policy_engine: None,
         }
     }
 
@@ -98,6 +101,11 @@ impl WriteFileTool {
 
     pub fn with_audit_store(mut self, audit_store: Arc<SqliteCheckpointStore>) -> Self {
         self.audit_store = Some(audit_store);
+        self
+    }
+
+    pub fn with_policy_engine(mut self, policy_engine: Arc<ExecutionPolicyEngine>) -> Self {
+        self.policy_engine = Some(policy_engine);
         self
     }
 }
@@ -142,6 +150,19 @@ impl Tool for WriteFileTool {
         }
     }
 
+    fn check_policy(&self, arguments: &serde_json::Value) -> Option<PolicyDecision> {
+        let p = arguments.get("path")?.as_str()?;
+        let engine = self.policy_engine.clone().unwrap_or_else(|| {
+            if let Some(ref store) = self.audit_store {
+                if let Ok(rec) = store.get_execution_policy() {
+                    return Arc::new(ExecutionPolicyEngine::from_record(&rec));
+                }
+            }
+            Arc::new(ExecutionPolicyEngine::default())
+        });
+        Some(engine.evaluate_path(p))
+    }
+
     fn execute<'a>(
         &'a self,
         scope: &'a ExecutionScope,
@@ -157,6 +178,38 @@ impl Tool for WriteFileTool {
                     size: args.content.len(),
                     limit: MAX_TEXT_BYTES,
                 });
+            }
+
+            let engine = self.policy_engine.clone().unwrap_or_else(|| {
+                if let Some(ref store) = self.audit_store {
+                    if let Ok(rec) = store.get_execution_policy() {
+                        return Arc::new(ExecutionPolicyEngine::from_record(&rec));
+                    }
+                }
+                Arc::new(ExecutionPolicyEngine::default())
+            });
+
+            if engine.evaluate_path(&args.path) == PolicyDecision::Deny {
+                if let Some(ref store) = self.audit_store {
+                    let _ = store
+                        .record_audit_log(&AuditLogEntry {
+                            id: Uuid::new_v4(),
+                            scope: *scope,
+                            actor_id: None,
+                            action: "sandbox.write_blocked".to_string(),
+                            target_id: None,
+                            details: serde_json::json!({
+                                "path": args.path,
+                                "error": "Access denied by execution policy",
+                            }),
+                            created_at: chrono::Utc::now(),
+                        })
+                        .await;
+                }
+                return Err(ToolError::AccessDenied(format!(
+                    "Writing to path '{}' is blocked by execution policy",
+                    args.path
+                )));
             }
 
             let resolve_res = resolve_writable_file(&self.workspace_root, &args.path);

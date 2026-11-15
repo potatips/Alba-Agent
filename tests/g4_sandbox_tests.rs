@@ -219,3 +219,80 @@ async fn test_macos_seatbelt_runner_platform_check() {
         }
     }
 }
+
+#[tokio::test]
+async fn test_seatbelt_containment_working_runner() {
+    #[cfg(not(target_os = "macos"))]
+    {
+        eprintln!("Skipping seatbelt containment test on non-macOS platform");
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let ws = tempdir().unwrap();
+        let audit_db = ws.path().join("containment_audit.db");
+        let store = Arc::new(SqliteCheckpointStore::new(&audit_db).unwrap());
+        let tool = RunCommandTool::new(ws.path().to_path_buf()).with_audit_store(store.clone());
+        let scope = ExecutionScope::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()).unwrap();
+
+        let in_file = ws.path().join("inside.txt");
+        let pos_args = serde_json::json!({
+            "program": "/bin/sh",
+            "args": ["-c", "echo hello > inside.txt"],
+            "allow_network": false
+        });
+        let pos_res = tool.execute(&scope, &pos_args).await;
+        assert!(pos_res.is_ok());
+        assert!(in_file.exists());
+
+        let out_path = format!("/private/tmp/outside_test_{}.txt", Uuid::new_v4());
+        let out_args = serde_json::json!({
+            "program": "/bin/sh",
+            "args": ["-c", format!("echo illegal > {}", out_path)],
+            "allow_network": false
+        });
+        let out_res = tool.execute(&scope, &out_args).await;
+        assert!(!std::path::Path::new(&out_path).exists());
+        let out_failed = match out_res {
+            Ok(s) => {
+                let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+                v.get("exit_code").and_then(|c| c.as_i64()).unwrap_or(0) != 0
+            }
+            Err(_) => true,
+        };
+        assert!(out_failed);
+
+        let ssh_args = serde_json::json!({
+            "program": "/bin/sh",
+            "args": ["-c", "cat ~/.ssh/id_rsa || cat ~/.ssh/id_ed25519 || cat ~/.ssh/known_hosts"],
+            "allow_network": false
+        });
+        let ssh_res = tool.execute(&scope, &ssh_args).await;
+        let ssh_failed = match ssh_res {
+            Ok(s) => {
+                let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+                v.get("exit_code").and_then(|c| c.as_i64()).unwrap_or(0) != 0
+            }
+            Err(_) => true,
+        };
+        assert!(ssh_failed);
+
+        let net_args = serde_json::json!({
+            "program": "/usr/bin/nc",
+            "args": ["-z", "-w", "1", "1.1.1.1", "80"],
+            "allow_network": false
+        });
+        let net_res = tool.execute(&scope, &net_args).await;
+        let net_failed = match net_res {
+            Ok(s) => {
+                let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+                v.get("exit_code").and_then(|c| c.as_i64()).unwrap_or(0) != 0
+            }
+            Err(_) => true,
+        };
+        assert!(net_failed);
+
+        let logs = store.list_audit_logs(&scope).await.unwrap();
+        assert!(logs.iter().any(|l| l.action == "sandbox.execution_denied"));
+    }
+}

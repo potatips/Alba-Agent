@@ -19,8 +19,9 @@ use crate::governance::policy::ApprovalPolicy;
 use crate::models::adapter::ModelClient;
 use crate::models::types::{ModelError, ModelRequest};
 use crate::schema::{
-    ApprovalGateNodeSpec, CrewNodeSpec, CrewProcess, EndNodeSpec, JoinMode, ParallelBranchNodeSpec,
-    RouterNodeSpec, StartNodeSpec, TaskSpec, WorkflowNode, WorkflowSpec,
+    ApprovalGateNodeSpec, CrewNodeSpec, CrewProcess, EndNodeSpec, JoinMode,
+    NexusGenSandboxNodeSpec, ParallelBranchNodeSpec, RouterNodeSpec, StartNodeSpec, TaskSpec,
+    WorkflowNode, WorkflowSpec,
 };
 use crate::tools::types::{ToolError, ToolRegistry};
 use crate::workflow::state::{WorkflowExecutionContext, WorkflowNodeState, WorkflowRunState};
@@ -546,10 +547,8 @@ where
                     )));
                 }
                 WorkflowNode::Sandbox(sandbox_spec) => {
-                    return Err(WorkflowExecutionError::ExecutionFailed(format!(
-                        "Sandbox node '{}' is not supported in v1",
-                        sandbox_spec.id
-                    )));
+                    self.execute_sandbox_node(spec, scope, context, sandbox_spec)
+                        .await?;
                 }
             }
         }
@@ -668,112 +667,8 @@ where
             .map(str::trim)
             .filter(|s| !s.is_empty());
 
-        if let Some(cmd) = cmd_opt {
-            let start_time = std::time::Instant::now();
-            let policy = crate::sandbox::SandboxPolicy::new(&self.workspace_root);
-            let exec_res = crate::sandbox::SandboxRunner::execute(
-                &policy,
-                "/bin/sh",
-                &["-c".to_string(), cmd.to_string()],
-                None,
-            )
-            .await;
-            let duration_ms = start_time.elapsed().as_millis() as i64;
-
-            let (real_exit_code, stdout, stderr) = match exec_res {
-                Ok(out) => (out.exit_code, out.stdout, out.stderr),
-                Err(err) => (-1, String::new(), err.to_string()),
-            };
-
-            let output_hash = crate::checkpoints::types::RunEvidenceRecord::compute_output_sha256(
-                &stdout, &stderr,
-            );
-
-            for art_path in &declared_artifacts {
-                let full_path = self.workspace_root.join(art_path);
-                let (size, hash) = if full_path.exists() {
-                    let bytes = std::fs::read(&full_path).unwrap_or_default();
-                    use sha2::{Digest, Sha256};
-                    let mut hasher = Sha256::new();
-                    hasher.update(&bytes);
-                    (bytes.len() as i64, format!("{:x}", hasher.finalize()))
-                } else {
-                    (0, String::new())
-                };
-                let mime = detect_mime_type(&full_path);
-                let art_rec = crate::checkpoints::types::ArtifactRecord {
-                    id: Uuid::new_v4().to_string(),
-                    run_id: scope.run_id.to_string(),
-                    filename: art_path.clone(),
-                    file_path: full_path.to_string_lossy().to_string(),
-                    file_size: size,
-                    mime_type: mime,
-                    sha256: hash,
-                    verified: real_exit_code == 0,
-                    created_at: Utc::now().to_rfc3339(),
-                };
-                let _ = self.checkpoint_store.record_artifact(&art_rec).await;
-            }
-
-            let is_verified = real_exit_code == 0;
-            let unverified_reason = if is_verified {
-                None
-            } else {
-                Some(format!(
-                    "Verification command exited with status {}",
-                    real_exit_code
-                ))
-            };
-
-            let evidence_rec = crate::checkpoints::types::RunEvidenceRecord {
-                id: Uuid::new_v4().to_string(),
-                run_id: scope.run_id.to_string(),
-                command: cmd.to_string(),
-                exit_code: real_exit_code,
-                stdout,
-                stderr,
-                duration_ms,
-                verified: is_verified,
-                created_at: Utc::now().to_rfc3339(),
-                output_sha256: output_hash,
-                unverified_reason,
-            };
-            let _ = self
-                .checkpoint_store
-                .record_run_evidence(&evidence_rec)
-                .await;
-
-            let _ = self
-                .checkpoint_store
-                .mark_verified(&scope.run_id.to_string(), is_verified)
-                .await;
-        } else {
-            for art_path in &declared_artifacts {
-                let full_path = self.workspace_root.join(art_path);
-                let (size, hash) = if full_path.exists() {
-                    let bytes = std::fs::read(&full_path).unwrap_or_default();
-                    use sha2::{Digest, Sha256};
-                    let mut hasher = Sha256::new();
-                    hasher.update(&bytes);
-                    (bytes.len() as i64, format!("{:x}", hasher.finalize()))
-                } else {
-                    (0, String::new())
-                };
-                let mime = detect_mime_type(&full_path);
-                let art_rec = crate::checkpoints::types::ArtifactRecord {
-                    id: Uuid::new_v4().to_string(),
-                    run_id: scope.run_id.to_string(),
-                    filename: art_path.clone(),
-                    file_path: full_path.to_string_lossy().to_string(),
-                    file_size: size,
-                    mime_type: mime,
-                    sha256: hash,
-                    verified: false,
-                    created_at: Utc::now().to_rfc3339(),
-                };
-                let _ = self.checkpoint_store.record_artifact(&art_rec).await;
-            }
-        }
+        self.run_verification_for_node(&scope, &crew_spec.id, &declared_artifacts, cmd_opt)
+            .await?;
 
         context
             .node_states
@@ -820,6 +715,362 @@ where
         }
 
         Ok(())
+    }
+
+    async fn execute_sandbox_node(
+        &self,
+        spec: &WorkflowSpec,
+        scope: ExecutionScope,
+        context: &mut WorkflowExecutionContext,
+        sandbox_spec: &NexusGenSandboxNodeSpec,
+    ) -> Result<(), WorkflowExecutionError> {
+        if !sandbox_spec.expected_artifact_paths.is_empty() {
+            let hook = crate::verification::validator::ArtifactContractHook::new();
+            let report = hook.validate_node_artifacts(
+                &self.workspace_root,
+                &sandbox_spec.id,
+                &sandbox_spec.expected_artifact_paths,
+                None,
+                None,
+            );
+            if !report.passed() {
+                let failure_reasons: Vec<String> = report
+                    .checks
+                    .iter()
+                    .filter(|c| {
+                        c.status != crate::verification::validator::CheckStatus::Verified
+                            && c.status != crate::verification::validator::CheckStatus::Recovered
+                    })
+                    .map(|c| format!("{}: {:?}", c.path, c.reason))
+                    .collect();
+                return Err(WorkflowExecutionError::ExecutionFailed(format!(
+                    "Artifact contract validation failed for sandbox node '{}': {}",
+                    sandbox_spec.id,
+                    failure_reasons.join(", ")
+                )));
+            }
+        }
+
+        let cmd_opt = if sandbox_spec.verification_command.trim().is_empty() {
+            None
+        } else {
+            Some(sandbox_spec.verification_command.trim())
+        };
+
+        self.run_verification_for_node(
+            &scope,
+            &sandbox_spec.id,
+            &sandbox_spec.expected_artifact_paths,
+            cmd_opt,
+        )
+        .await?;
+
+        context
+            .node_states
+            .insert(sandbox_spec.id.clone(), WorkflowNodeState::Completed);
+        context.completed_nodes.push(sandbox_spec.id.clone());
+
+        let node_output = serde_json::json!({
+            "status": "completed",
+            "node_id": sandbox_spec.id,
+        });
+        context
+            .node_outputs
+            .insert(sandbox_spec.id.clone(), node_output);
+
+        let next = self.find_next_node(spec, &sandbox_spec.id, None);
+        if let Some((next_node, _)) = next {
+            context.current_node_id = next_node.id().to_string();
+            context.sequence += 1;
+            context.updated_at = Utc::now();
+            self.save_checkpoint_step(scope, context).await?;
+            self.event_sink.emit(
+                RuntimeEvent::new(
+                    scope,
+                    RuntimeEventType::FlowStateChanged,
+                    serde_json::json!({
+                        "node_id": sandbox_spec.id,
+                        "status": "completed",
+                        "next_node": next_node.id()
+                    }),
+                )
+                .with_node(&sandbox_spec.id),
+            )?;
+        } else {
+            let is_branch_child = spec.nodes.iter().any(|n| {
+                if let WorkflowNode::ParallelBranch(pb) = n {
+                    pb.branch_nodes.contains(&sandbox_spec.id)
+                } else {
+                    false
+                }
+            });
+            if !is_branch_child {
+                return Err(WorkflowExecutionError::ExecutionFailed(format!(
+                    "Sandbox node '{}' has no outgoing edges",
+                    sandbox_spec.id
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn run_verification_for_node(
+        &self,
+        scope: &ExecutionScope,
+        node_id: &str,
+        declared_artifacts: &[String],
+        cmd_opt: Option<&str>,
+    ) -> Result<bool, WorkflowExecutionError> {
+        let mut artifact_records = Vec::new();
+        let mut any_artifact_error = false;
+        let mut artifact_error_msg = None;
+
+        for art_path in declared_artifacts {
+            let full_path = self.workspace_root.join(art_path);
+            let (size, hash) = if full_path.exists() {
+                match std::fs::read(&full_path) {
+                    Ok(bytes) => {
+                        use sha2::{Digest, Sha256};
+                        let mut hasher = Sha256::new();
+                        hasher.update(&bytes);
+                        (bytes.len() as i64, format!("{:x}", hasher.finalize()))
+                    }
+                    Err(e) => {
+                        any_artifact_error = true;
+                        artifact_error_msg =
+                            Some(format!("Failed to read artifact '{}': {}", art_path, e));
+                        (0, String::new())
+                    }
+                }
+            } else {
+                any_artifact_error = true;
+                artifact_error_msg = Some(format!("Artifact '{}' does not exist", art_path));
+                (0, String::new())
+            };
+            let mime = detect_mime_type(&full_path);
+            let art_rec = crate::checkpoints::types::ArtifactRecord {
+                id: Uuid::new_v4().to_string(),
+                run_id: scope.run_id.to_string(),
+                filename: art_path.clone(),
+                file_path: full_path.to_string_lossy().to_string(),
+                file_size: size,
+                mime_type: mime,
+                sha256: hash,
+                verified: false,
+                created_at: Utc::now().to_rfc3339(),
+            };
+            artifact_records.push(art_rec);
+        }
+
+        if let Some(cmd) = cmd_opt {
+            let policy_rec = self
+                .checkpoint_store
+                .get_execution_policy()
+                .await
+                .unwrap_or_default();
+            let policy_engine =
+                crate::verification::policy::ExecutionPolicyEngine::from_record(&policy_rec);
+            let decision = policy_engine.evaluate_command(cmd);
+
+            let (
+                real_exit_code,
+                stdout,
+                stderr,
+                duration_ms,
+                mut is_verified,
+                mut unverified_reason,
+            ) = match decision {
+                crate::verification::policy::PolicyDecision::Deny => {
+                    let err_msg =
+                        format!("Verification command denied by execution policy: {}", cmd);
+                    let _ = self
+                        .checkpoint_store
+                        .record_audit_log(&crate::checkpoints::types::AuditLogEntry {
+                            id: Uuid::new_v4(),
+                            scope: *scope,
+                            actor_id: None,
+                            action: "policy.command_denied".to_string(),
+                            target_id: None,
+                            details: serde_json::json!({
+                                "node_id": node_id,
+                                "command": cmd,
+                                "decision": "Deny",
+                                "reason": "Verification command denied by execution policy",
+                            }),
+                            created_at: Utc::now(),
+                        })
+                        .await;
+                    (-1, String::new(), err_msg.clone(), 0, false, Some(err_msg))
+                }
+                crate::verification::policy::PolicyDecision::Ask => {
+                    let err_msg = format!(
+                        "Verification command requires approval (unattended execution not allowed): {}",
+                        cmd
+                    );
+                    let _ = self
+                        .checkpoint_store
+                        .record_audit_log(&crate::checkpoints::types::AuditLogEntry {
+                            id: Uuid::new_v4(),
+                            scope: *scope,
+                            actor_id: None,
+                            action: "policy.command_denied".to_string(),
+                            target_id: None,
+                            details: serde_json::json!({
+                                "node_id": node_id,
+                                "command": cmd,
+                                "decision": "Ask",
+                                "reason": "Verification command requires approval (unattended execution not allowed)",
+                            }),
+                            created_at: Utc::now(),
+                        })
+                        .await;
+                    (-1, String::new(), err_msg.clone(), 0, false, Some(err_msg))
+                }
+                crate::verification::policy::PolicyDecision::Allow => {
+                    let start_time = std::time::Instant::now();
+                    let policy = crate::sandbox::SandboxPolicy::new(&self.workspace_root);
+                    let exec_res = crate::sandbox::SandboxRunner::execute(
+                        &policy,
+                        "/bin/sh",
+                        &["-c".to_string(), cmd.to_string()],
+                        None,
+                    )
+                    .await;
+                    let duration_ms = start_time.elapsed().as_millis() as i64;
+                    let (code, out, err) = match exec_res {
+                        Ok(output) => (output.exit_code, output.stdout, output.stderr),
+                        Err(e) => (-1, String::new(), e.to_string()),
+                    };
+                    let ok = code == 0;
+                    let reason = if ok {
+                        None
+                    } else {
+                        Some(format!("Verification command exited with status {}", code))
+                    };
+                    (code, out, err, duration_ms, ok, reason)
+                }
+            };
+
+            if any_artifact_error {
+                is_verified = false;
+                if unverified_reason.is_none() {
+                    unverified_reason = artifact_error_msg;
+                }
+            }
+
+            let output_hash = crate::checkpoints::types::RunEvidenceRecord::compute_output_sha256(
+                &stdout, &stderr,
+            );
+
+            for art_rec in &mut artifact_records {
+                art_rec.verified = is_verified;
+                if let Err(e) = self.checkpoint_store.record_artifact(art_rec).await {
+                    let _ = self
+                        .checkpoint_store
+                        .record_audit_log(&crate::checkpoints::types::AuditLogEntry {
+                            id: Uuid::new_v4(),
+                            scope: *scope,
+                            actor_id: None,
+                            action: "verification.store_error".to_string(),
+                            target_id: None,
+                            details: serde_json::json!({
+                                "operation": "record_artifact",
+                                "artifact": art_rec.filename,
+                                "error": e.to_string(),
+                            }),
+                            created_at: Utc::now(),
+                        })
+                        .await;
+                    is_verified = false;
+                    unverified_reason = Some(format!("Failed to record artifact: {}", e));
+                }
+            }
+
+            let evidence_rec = crate::checkpoints::types::RunEvidenceRecord {
+                id: Uuid::new_v4().to_string(),
+                run_id: scope.run_id.to_string(),
+                command: cmd.to_string(),
+                exit_code: real_exit_code,
+                stdout,
+                stderr,
+                duration_ms,
+                verified: is_verified,
+                created_at: Utc::now().to_rfc3339(),
+                output_sha256: output_hash,
+                unverified_reason,
+            };
+
+            if let Err(e) = self
+                .checkpoint_store
+                .record_run_evidence(&evidence_rec)
+                .await
+            {
+                let _ = self
+                    .checkpoint_store
+                    .record_audit_log(&crate::checkpoints::types::AuditLogEntry {
+                        id: Uuid::new_v4(),
+                        scope: *scope,
+                        actor_id: None,
+                        action: "verification.store_error".to_string(),
+                        target_id: None,
+                        details: serde_json::json!({
+                            "operation": "record_run_evidence",
+                            "error": e.to_string(),
+                        }),
+                        created_at: Utc::now(),
+                    })
+                    .await;
+                is_verified = false;
+            }
+
+            if let Err(e) = self
+                .checkpoint_store
+                .mark_verified(&scope.run_id.to_string(), is_verified)
+                .await
+            {
+                let _ = self
+                    .checkpoint_store
+                    .record_audit_log(&crate::checkpoints::types::AuditLogEntry {
+                        id: Uuid::new_v4(),
+                        scope: *scope,
+                        actor_id: None,
+                        action: "verification.store_error".to_string(),
+                        target_id: None,
+                        details: serde_json::json!({
+                            "operation": "mark_verified",
+                            "error": e.to_string(),
+                        }),
+                        created_at: Utc::now(),
+                    })
+                    .await;
+                is_verified = false;
+            }
+
+            Ok(is_verified)
+        } else {
+            for art_rec in &artifact_records {
+                if let Err(e) = self.checkpoint_store.record_artifact(art_rec).await {
+                    let _ = self
+                        .checkpoint_store
+                        .record_audit_log(&crate::checkpoints::types::AuditLogEntry {
+                            id: Uuid::new_v4(),
+                            scope: *scope,
+                            actor_id: None,
+                            action: "verification.store_error".to_string(),
+                            target_id: None,
+                            details: serde_json::json!({
+                                "operation": "record_artifact",
+                                "artifact": art_rec.filename,
+                                "error": e.to_string(),
+                            }),
+                            created_at: Utc::now(),
+                        })
+                        .await;
+                }
+            }
+            Ok(false)
+        }
     }
 
     async fn execute_sequential_crew(

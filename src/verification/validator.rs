@@ -67,7 +67,10 @@ pub fn is_signature_ok(suffix: &str, head: &[u8]) -> bool {
         }
         ".zip" => head.starts_with(b"PK\x03\x04"),
         ".pdf" => head.starts_with(b"%PDF"),
-        _ => true,
+        ".gz" | ".gzip" => head.starts_with(&[0x1f, 0x8b]),
+        ".tar" => head.len() >= 262 && &head[257..262] == b"ustar",
+        ".db" | ".sqlite" | ".sqlite3" => head.starts_with(b"SQLite format 3\0"),
+        _ => is_text_suffix(suffix),
     }
 }
 
@@ -369,7 +372,7 @@ impl ArtifactContractHook {
             }
         };
 
-        let mut head = [0u8; 16];
+        let mut head = [0u8; 512];
         use std::io::Read;
         let bytes_read = match file.read(&mut head) {
             Ok(n) => n,

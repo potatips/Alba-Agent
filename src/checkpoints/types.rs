@@ -94,6 +94,33 @@ pub struct RunRecord {
     pub unverified_reason: Option<String>,
 }
 
+impl Default for RunRecord {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            workflow_id: String::new(),
+            status: "PENDING".to_string(),
+            input_data: "{}".to_string(),
+            output_data: None,
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+            completed_at: None,
+            verified: false,
+            unverified_reason: None,
+        }
+    }
+}
+
+impl RunRecord {
+    pub fn new(id: impl Into<String>, workflow_id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            workflow_id: workflow_id.into(),
+            ..Default::default()
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunEvidenceRecord {
     pub id: String,
@@ -111,7 +138,33 @@ pub struct RunEvidenceRecord {
     pub unverified_reason: Option<String>,
 }
 
+impl Default for RunEvidenceRecord {
+    fn default() -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            run_id: String::new(),
+            command: String::new(),
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            duration_ms: 0,
+            verified: false,
+            created_at: Utc::now().to_rfc3339(),
+            output_sha256: String::new(),
+            unverified_reason: None,
+        }
+    }
+}
+
 impl RunEvidenceRecord {
+    pub fn new(run_id: impl Into<String>, command: impl Into<String>) -> Self {
+        Self {
+            run_id: run_id.into(),
+            command: command.into(),
+            ..Default::default()
+        }
+    }
+
     pub fn compute_output_sha256(stdout: &str, stderr: &str) -> String {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -158,4 +211,20 @@ pub struct ExecutionPolicyRecord {
     pub default_mode: String,
     pub allowed_domains: Vec<String>,
     pub denied_domains: Vec<String>,
+}
+
+impl Default for ExecutionPolicyRecord {
+    fn default() -> Self {
+        Self {
+            default_mode: "allow".to_string(),
+            allowed_domains: vec![
+                "api.anthropic.com".to_string(),
+                "generativelanguage.googleapis.com".to_string(),
+            ],
+            denied_domains: vec![
+                "169.254.169.254".to_string(),
+                "metadata.google.internal".to_string(),
+            ],
+        }
+    }
 }

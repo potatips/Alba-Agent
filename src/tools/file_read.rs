@@ -8,6 +8,7 @@ use crate::checkpoints::store::CheckpointStore;
 use crate::checkpoints::types::AuditLogEntry;
 use crate::domain::ExecutionScope;
 use crate::tools::types::{BoxFuture, Tool, ToolDefinition, ToolError};
+use crate::verification::policy::{ExecutionPolicyEngine, PolicyDecision};
 
 pub const DEFAULT_MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
 
@@ -16,6 +17,7 @@ pub struct ReadFileTool {
     workspace_root: PathBuf,
     max_bytes: usize,
     audit_store: Option<Arc<SqliteCheckpointStore>>,
+    policy_engine: Option<Arc<ExecutionPolicyEngine>>,
 }
 
 impl ReadFileTool {
@@ -24,6 +26,7 @@ impl ReadFileTool {
             workspace_root: workspace_root.into(),
             max_bytes: DEFAULT_MAX_FILE_BYTES,
             audit_store: None,
+            policy_engine: None,
         }
     }
 
@@ -34,6 +37,11 @@ impl ReadFileTool {
 
     pub fn with_audit_store(mut self, audit_store: Arc<SqliteCheckpointStore>) -> Self {
         self.audit_store = Some(audit_store);
+        self
+    }
+
+    pub fn with_policy_engine(mut self, policy_engine: Arc<ExecutionPolicyEngine>) -> Self {
+        self.policy_engine = Some(policy_engine);
         self
     }
 
@@ -170,6 +178,19 @@ impl Tool for ReadFileTool {
         }
     }
 
+    fn check_policy(&self, arguments: &serde_json::Value) -> Option<PolicyDecision> {
+        let p = arguments.get("path")?.as_str()?;
+        let engine = self.policy_engine.clone().unwrap_or_else(|| {
+            if let Some(ref store) = self.audit_store {
+                if let Ok(rec) = store.get_execution_policy() {
+                    return Arc::new(ExecutionPolicyEngine::from_record(&rec));
+                }
+            }
+            Arc::new(ExecutionPolicyEngine::default())
+        });
+        Some(engine.evaluate_path(p))
+    }
+
     fn execute<'a>(
         &'a self,
         _scope: &'a ExecutionScope,
@@ -183,6 +204,38 @@ impl Tool for ReadFileTool {
             let relative_path = path_val.as_str().ok_or_else(|| {
                 ToolError::InvalidArguments("Parameter 'path' must be a string".to_string())
             })?;
+
+            let engine = self.policy_engine.clone().unwrap_or_else(|| {
+                if let Some(ref store) = self.audit_store {
+                    if let Ok(rec) = store.get_execution_policy() {
+                        return Arc::new(ExecutionPolicyEngine::from_record(&rec));
+                    }
+                }
+                Arc::new(ExecutionPolicyEngine::default())
+            });
+
+            if engine.evaluate_path(relative_path) == PolicyDecision::Deny {
+                if let Some(ref store) = self.audit_store {
+                    let _ = store
+                        .record_audit_log(&AuditLogEntry {
+                            id: Uuid::new_v4(),
+                            scope: *_scope,
+                            actor_id: None,
+                            action: "sandbox.read_blocked".to_string(),
+                            target_id: None,
+                            details: serde_json::json!({
+                                "path": relative_path,
+                                "error": "Access denied by execution policy",
+                            }),
+                            created_at: chrono::Utc::now(),
+                        })
+                        .await;
+                }
+                return Err(ToolError::AccessDenied(format!(
+                    "Access to path '{}' is blocked by execution policy",
+                    relative_path
+                )));
+            }
 
             let resolve_res = self.validate_and_resolve(relative_path);
             let resolved = match resolve_res {

@@ -295,7 +295,28 @@ impl ExecutionPolicyEngine {
             }
         }
 
-        PolicyDecision::Allow
+        let safe_prefixes = [
+            "cargo test",
+            "cargo check",
+            "cargo build",
+            "git status",
+            "git diff",
+            "pwd",
+        ];
+        for prefix in &safe_prefixes {
+            if cmd_lower == *prefix || cmd_lower.starts_with(&format!("{} ", prefix)) {
+                return PolicyDecision::Allow;
+            }
+        }
+        if cmd_lower == "ls" || cmd_lower.starts_with("ls ") {
+            return PolicyDecision::Allow;
+        }
+
+        if self.config.strict_mode {
+            PolicyDecision::Ask
+        } else {
+            PolicyDecision::Allow
+        }
     }
 
     pub fn evaluate(&self, kind: PolicyTarget<'_>) -> PolicyDecision {

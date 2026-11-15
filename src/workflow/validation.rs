@@ -67,11 +67,14 @@ pub fn validate_workflow_spec(spec: &WorkflowSpec) -> Result<(), WorkflowValidat
                 });
             }
             WorkflowNode::Sandbox(sandbox) => {
-                return Err(WorkflowValidationError::UnsupportedNodeKind {
-                    node_id: sandbox.id.clone(),
-                    kind: "sandbox".to_string(),
-                    reason: "NexusGenSandboxNode is not supported in local engine v1".to_string(),
-                });
+                if sandbox.sandbox_provider == "docker" {
+                    return Err(WorkflowValidationError::UnsupportedNodeKind {
+                        node_id: sandbox.id.clone(),
+                        kind: "sandbox".to_string(),
+                        reason: "NexusGenSandboxNode is not supported in local engine v1"
+                            .to_string(),
+                    });
+                }
             }
             WorkflowNode::ParallelBranch(pb) => {
                 if pb.branch_nodes.is_empty() {

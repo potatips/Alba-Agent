@@ -65,7 +65,7 @@ fn default_trigger_type() -> String {
     "manual".to_string()
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct CrewNodeSpec {
     pub id: String,
     pub label: String,
@@ -85,6 +85,16 @@ pub struct CrewNodeSpec {
     pub requires_visual_evidence: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification_command: Option<String>,
+}
+
+impl CrewNodeSpec {
+    pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

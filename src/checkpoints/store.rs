@@ -201,4 +201,12 @@ pub trait CheckpointStore: Send + Sync {
             Ok(false)
         }
     }
+
+    fn get_execution_policy(
+        &self,
+    ) -> impl std::future::Future<
+        Output = Result<crate::checkpoints::types::ExecutionPolicyRecord, CheckpointError>,
+    > + Send {
+        async move { Ok(crate::checkpoints::types::ExecutionPolicyRecord::default()) }
+    }
 }

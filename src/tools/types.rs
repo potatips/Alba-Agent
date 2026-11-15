@@ -40,6 +40,12 @@ pub trait Tool: Send + Sync {
         scope: &'a ExecutionScope,
         arguments: &'a serde_json::Value,
     ) -> BoxFuture<'a, Result<String, ToolError>>;
+    fn check_policy(
+        &self,
+        _arguments: &serde_json::Value,
+    ) -> Option<crate::verification::policy::PolicyDecision> {
+        None
+    }
 }
 
 #[derive(Default, Clone)]
@@ -52,6 +58,16 @@ impl ToolRegistry {
         Self {
             tools: HashMap::new(),
         }
+    }
+
+    pub fn check_policy(
+        &self,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) -> Option<crate::verification::policy::PolicyDecision> {
+        self.tools
+            .get(tool_name)
+            .and_then(|t| t.check_policy(arguments))
     }
 
     pub fn register(&mut self, tool: Arc<dyn Tool>) {

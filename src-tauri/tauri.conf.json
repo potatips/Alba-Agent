@@ -3,8 +3,8 @@
   "version": "0.1.0",
   "identifier": "com.albaagent.desktop",
   "build": {
-    "beforeDevCommand": "pnpm --prefix ../web dev",
-    "beforeBuildCommand": "pnpm --prefix ../web build",
+    "beforeDevCommand": "pnpm --prefix ./web dev",
+    "beforeBuildCommand": "pnpm --prefix ./web build",
     "frontendDist": "../web/out"
   },
   "app": {

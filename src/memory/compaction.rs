@@ -259,7 +259,7 @@ pub async fn compact_conversation_history<M: ModelClient>(
 
     let summary_message = ChatMessage {
         role: MessageRole::System,
-        content: summary_content,
+        content: crate::memory::firewall::RedactionEngine::default().redact(&summary_content, &[]),
         tool_calls: None,
         tool_call_id: None,
     };

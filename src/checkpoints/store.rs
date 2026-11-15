@@ -245,6 +245,17 @@ pub trait CheckpointStore: Send + Sync {
         }
     }
 
+    fn set_knowledge_capsule_negative_transfer(
+        &self,
+        id: &str,
+        negative: bool,
+    ) -> impl std::future::Future<Output = Result<(), CheckpointError>> + Send {
+        async move {
+            let _ = (id, negative);
+            Ok(())
+        }
+    }
+
     fn insert_capsule_vector(
         &self,
         capsule_id: &str,

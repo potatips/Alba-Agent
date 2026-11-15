@@ -3724,6 +3724,14 @@ impl CheckpointStore for SqliteCheckpointStore {
         self.list_knowledge_capsules(tenant_id, workspace_id)
     }
 
+    async fn set_knowledge_capsule_negative_transfer(
+        &self,
+        id: &str,
+        negative: bool,
+    ) -> Result<(), CheckpointError> {
+        self.set_knowledge_capsule_negative_transfer(id, negative)
+    }
+
     async fn insert_capsule_vector(
         &self,
         capsule_id: &str,

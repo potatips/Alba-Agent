@@ -244,4 +244,35 @@ pub trait CheckpointStore: Send + Sync {
             Ok(Vec::new())
         }
     }
+
+    fn insert_capsule_vector(
+        &self,
+        capsule_id: &str,
+        tenant_id: &str,
+        workspace_id: &str,
+        vector: &[f32],
+    ) -> impl std::future::Future<Output = Result<(), CheckpointError>> + Send {
+        async move {
+            let _ = (capsule_id, tenant_id, workspace_id, vector);
+            Ok(())
+        }
+    }
+
+    fn search_capsules_vector(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        query_vector: &[f32],
+        top_k: usize,
+    ) -> impl std::future::Future<
+        Output = Result<
+            Vec<(crate::checkpoints::types::KnowledgeCapsuleRecord, f32)>,
+            CheckpointError,
+        >,
+    > + Send {
+        async move {
+            let _ = (tenant_id, workspace_id, query_vector, top_k);
+            Ok(Vec::new())
+        }
+    }
 }

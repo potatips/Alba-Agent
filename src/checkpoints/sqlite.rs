@@ -629,6 +629,28 @@ impl SqliteCheckpointStore {
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
         }
 
+        if current_version < 11 {
+            conn.execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS capsule_vectors (
+                    id TEXT PRIMARY KEY,
+                    capsule_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL,
+                    vector BLOB NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_capsule_vectors_scope ON capsule_vectors(tenant_id, workspace_id);
+                CREATE INDEX IF NOT EXISTS idx_capsule_vectors_capsule ON capsule_vectors(capsule_id);
+
+                INSERT INTO schema_migrations (version, applied_at)
+                VALUES (11, datetime('now'));
+                ",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        }
+
         Ok(())
     }
 
@@ -1929,6 +1951,143 @@ impl SqliteCheckpointStore {
         }
 
         Ok(events)
+    }
+
+    pub fn insert_capsule_vector(
+        &self,
+        capsule_id: &str,
+        tenant_id: &str,
+        workspace_id: &str,
+        vector: &[f32],
+    ) -> Result<(), CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let bytes = crate::memory::vector::vector_to_bytes(vector);
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO capsule_vectors (id, capsule_id, tenant_id, workspace_id, vector, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, capsule_id, tenant_id, workspace_id, bytes, now],
+        )
+        .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn search_capsules_vector(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        query_vector: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<(KnowledgeCapsuleRecord, f32)>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.id, c.tenant_id, c.workspace_id, c.source_run_id, c.source_agent_id, c.source_role,
+                        c.source_domain_tags_json, c.trigger_preconditions, c.distilled_heuristic,
+                        c.prohibited_contexts_json, c.propagation_scope, c.sensitivity_level,
+                        c.source_workflow_id, c.source_crew_id, c.confidence, c.negative_transfer,
+                        c.created_at, v.vector
+                 FROM capsule_vectors v
+                 JOIN knowledge_capsules c ON v.capsule_id = c.id
+                 WHERE v.tenant_id = ?1 AND v.workspace_id = ?2 AND c.negative_transfer = 0",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![tenant_id, workspace_id], |r| {
+                let tags_str: String = r.get(6)?;
+                let prohibited_str: String = r.get(9)?;
+                let neg_i: i64 = r.get(15)?;
+                let vec_blob: Vec<u8> = r.get(17)?;
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                    tags_str,
+                    r.get::<_, String>(7)?,
+                    r.get::<_, String>(8)?,
+                    prohibited_str,
+                    r.get::<_, String>(10)?,
+                    r.get::<_, String>(11)?,
+                    r.get::<_, Option<String>>(12)?,
+                    r.get::<_, Option<String>>(13)?,
+                    r.get::<_, f64>(14)?,
+                    neg_i != 0,
+                    r.get::<_, String>(16)?,
+                    vec_blob,
+                ))
+            })
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        let mut scored = Vec::new();
+        for row in rows {
+            let (
+                id,
+                tenant_id,
+                workspace_id,
+                source_run_id,
+                source_agent_id,
+                source_role,
+                tags_str,
+                trigger_preconditions,
+                distilled_heuristic,
+                prohibited_str,
+                propagation_scope,
+                sensitivity_level,
+                source_workflow_id,
+                source_crew_id,
+                confidence,
+                negative_transfer,
+                created_at,
+                vec_blob,
+            ) = row.map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+            let stored_vec = crate::memory::vector::bytes_to_vector(&vec_blob)
+                .map_err(CheckpointError::SerializationError)?;
+            let score = crate::memory::vector::cosine_similarity(query_vector, &stored_vec);
+
+            let source_domain_tags: Vec<String> =
+                serde_json::from_str(&tags_str).unwrap_or_default();
+            let prohibited_contexts: Vec<String> =
+                serde_json::from_str(&prohibited_str).unwrap_or_default();
+
+            let capsule = KnowledgeCapsuleRecord {
+                id,
+                tenant_id,
+                workspace_id,
+                source_run_id,
+                source_agent_id,
+                source_role,
+                source_domain_tags,
+                trigger_preconditions,
+                distilled_heuristic,
+                prohibited_contexts,
+                propagation_scope,
+                sensitivity_level,
+                source_workflow_id,
+                source_crew_id,
+                confidence,
+                negative_transfer,
+                created_at,
+            };
+            scored.push((capsule, score));
+        }
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        if scored.len() > top_k {
+            scored.truncate(top_k);
+        }
+        Ok(scored)
     }
 }
 
@@ -3563,5 +3722,25 @@ impl CheckpointStore for SqliteCheckpointStore {
         workspace_id: &str,
     ) -> Result<Vec<KnowledgeCapsuleRecord>, CheckpointError> {
         self.list_knowledge_capsules(tenant_id, workspace_id)
+    }
+
+    async fn insert_capsule_vector(
+        &self,
+        capsule_id: &str,
+        tenant_id: &str,
+        workspace_id: &str,
+        vector: &[f32],
+    ) -> Result<(), CheckpointError> {
+        self.insert_capsule_vector(capsule_id, tenant_id, workspace_id, vector)
+    }
+
+    async fn search_capsules_vector(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        query_vector: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<(KnowledgeCapsuleRecord, f32)>, CheckpointError> {
+        self.search_capsules_vector(tenant_id, workspace_id, query_vector, top_k)
     }
 }

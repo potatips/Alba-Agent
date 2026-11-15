@@ -3,10 +3,9 @@
   "version": "0.1.0",
   "identifier": "com.albaagent.desktop",
   "build": {
-    "beforeDevCommand": "npm --prefix ../ui run dev",
-    "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm --prefix ../ui run build",
-    "frontendDist": "../ui/dist"
+    "beforeDevCommand": "pnpm --prefix ../web dev",
+    "beforeBuildCommand": "pnpm --prefix ../web build",
+    "frontendDist": "../web/out"
   },
   "app": {
     "windows": [
@@ -19,7 +18,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*;"
     }
   },
   "bundle": {

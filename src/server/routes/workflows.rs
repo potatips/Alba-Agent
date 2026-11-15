@@ -179,6 +179,7 @@ pub async fn create_workflow_run_handler(
         updated_at: now,
         completed_at: None,
         verified: false,
+        unverified_reason: None,
     };
 
     state

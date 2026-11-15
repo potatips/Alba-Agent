@@ -183,6 +183,7 @@ async fn test_three_agent_hierarchical_crew_execution() {
                 join: JoinMode::Any,
                 expected_artifact_paths: vec![],
                 requires_visual_evidence: false,
+                verification_command: None,
             }),
             WorkflowNode::End(EndNodeSpec {
                 id: "end".to_string(),

@@ -105,6 +105,7 @@ fn test_full_workflow_spec_roundtrip() {
         join: JoinMode::Any,
         expected_artifact_paths: vec!["src/app.rs".to_string()],
         requires_visual_evidence: false,
+        verification_command: None,
     });
 
     let approval_node = WorkflowNode::Approval(ApprovalGateNodeSpec {

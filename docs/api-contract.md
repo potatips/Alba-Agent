@@ -189,6 +189,7 @@ The frontend is the unmodified `NexusAgent/apps/web` (Next.js 15, Tailwind v3).
 - **Purpose**: Queries run execution records.
 - **Headers**: `Authorization: Bearer <token>`
 - **Query Parameters**: `workflow_id` (optional), `limit` (default: 50)
+- **Additive Fields**: `verified` (boolean), `unverified_reason` (optional string).
 - **Response**: `200 OK`
   ```json
   [
@@ -197,14 +198,17 @@ The frontend is the unmodified `NexusAgent/apps/web` (Next.js 15, Tailwind v3).
       "workflow_id": "wf-12345",
       "status": "SUCCEEDED",
       "created_at": "2026-11-12T08:15:00Z",
-      "duration_seconds": 27.22
+      "duration_seconds": 27.22,
+      "verified": true,
+      "unverified_reason": null
     }
   ]
   ```
 
 ### 10. `GET /api/v1/runs/:id`
-- **Purpose**: Retrieves execution status, node states, and output summary for a single run.
+- **Purpose**: Retrieves execution status, node states, output summary, and verification verdict for a single run.
 - **Headers**: `Authorization: Bearer <token>`
+- **Additive Fields**: `verified` (boolean), `unverified_reason` (optional string explaining verification failure).
 - **Response**: `200 OK`
   ```json
   {
@@ -216,7 +220,9 @@ The frontend is the unmodified `NexusAgent/apps/web` (Next.js 15, Tailwind v3).
     "output_data": {
       "summary": "Completed market analysis report."
     },
-    "current_node_id": null
+    "current_node_id": null,
+    "verified": true,
+    "unverified_reason": null
   }
   ```
 
@@ -383,8 +389,9 @@ The frontend is the unmodified `NexusAgent/apps/web` (Next.js 15, Tailwind v3).
   ```
 
 ### 19b. `GET /api/v1/runs/:id/evidence`
-- **Purpose**: Lists machine verification command runs, terminal outputs, exit codes, and verification status for run auditing.
+- **Purpose**: Lists machine verification command runs, terminal outputs, exit codes, captured output SHA-256 hashes, and verification status for run auditing.
 - **Headers**: `Authorization: Bearer <token>`
+- **Additive Fields**: `output_sha256` (string SHA-256 of combined stdout + stderr), `unverified_reason` (optional string explaining non-zero exit or unverified status).
 - **Response**: `200 OK`
   ```json
   [
@@ -397,7 +404,9 @@ The frontend is the unmodified `NexusAgent/apps/web` (Next.js 15, Tailwind v3).
       "stderr": "",
       "duration_ms": 320,
       "verified": true,
-      "created_at": "2026-11-12T15:00:00Z"
+      "created_at": "2026-11-12T15:00:00Z",
+      "output_sha256": "4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a",
+      "unverified_reason": null
     }
   ]
   ```

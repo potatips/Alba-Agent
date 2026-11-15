@@ -85,6 +85,28 @@ where
     author_id: Option<String>,
 }
 
+fn detect_mime_type(path: &std::path::Path) -> String {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "txt" | "md" | "log" => "text/plain".to_string(),
+        "json" => "application/json".to_string(),
+        "pdf" => "application/pdf".to_string(),
+        "png" => "image/png".to_string(),
+        "jpg" | "jpeg" => "image/jpeg".to_string(),
+        "zip" => "application/zip".to_string(),
+        "tar" => "application/x-tar".to_string(),
+        "gz" => "application/gzip".to_string(),
+        "xml" => "application/xml".to_string(),
+        "html" => "text/html".to_string(),
+        "csv" => "text/csv".to_string(),
+        _ => "application/octet-stream".to_string(),
+    }
+}
+
 impl<M, S, E, P> WorkflowExecutor<M, S, E, P>
 where
     M: ModelClient + 'static,
@@ -628,6 +650,128 @@ where
                     crew_spec.id,
                     failure_reasons.join(", ")
                 )));
+            }
+        }
+
+        let mut declared_artifacts = crew_spec.expected_artifact_paths.clone();
+        for t in &crew_spec.tasks {
+            for p in &t.expected_artifact_paths {
+                if !declared_artifacts.contains(p) {
+                    declared_artifacts.push(p.clone());
+                }
+            }
+        }
+
+        let cmd_opt = crew_spec
+            .verification_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        if let Some(cmd) = cmd_opt {
+            let start_time = std::time::Instant::now();
+            let policy = crate::sandbox::SandboxPolicy::new(&self.workspace_root);
+            let exec_res = crate::sandbox::SandboxRunner::execute(
+                &policy,
+                "/bin/sh",
+                &["-c".to_string(), cmd.to_string()],
+                None,
+            )
+            .await;
+            let duration_ms = start_time.elapsed().as_millis() as i64;
+
+            let (real_exit_code, stdout, stderr) = match exec_res {
+                Ok(out) => (out.exit_code, out.stdout, out.stderr),
+                Err(err) => (-1, String::new(), err.to_string()),
+            };
+
+            let output_hash = crate::checkpoints::types::RunEvidenceRecord::compute_output_sha256(
+                &stdout, &stderr,
+            );
+
+            for art_path in &declared_artifacts {
+                let full_path = self.workspace_root.join(art_path);
+                let (size, hash) = if full_path.exists() {
+                    let bytes = std::fs::read(&full_path).unwrap_or_default();
+                    use sha2::{Digest, Sha256};
+                    let mut hasher = Sha256::new();
+                    hasher.update(&bytes);
+                    (bytes.len() as i64, format!("{:x}", hasher.finalize()))
+                } else {
+                    (0, String::new())
+                };
+                let mime = detect_mime_type(&full_path);
+                let art_rec = crate::checkpoints::types::ArtifactRecord {
+                    id: Uuid::new_v4().to_string(),
+                    run_id: scope.run_id.to_string(),
+                    filename: art_path.clone(),
+                    file_path: full_path.to_string_lossy().to_string(),
+                    file_size: size,
+                    mime_type: mime,
+                    sha256: hash,
+                    verified: real_exit_code == 0,
+                    created_at: Utc::now().to_rfc3339(),
+                };
+                let _ = self.checkpoint_store.record_artifact(&art_rec).await;
+            }
+
+            let is_verified = real_exit_code == 0;
+            let unverified_reason = if is_verified {
+                None
+            } else {
+                Some(format!(
+                    "Verification command exited with status {}",
+                    real_exit_code
+                ))
+            };
+
+            let evidence_rec = crate::checkpoints::types::RunEvidenceRecord {
+                id: Uuid::new_v4().to_string(),
+                run_id: scope.run_id.to_string(),
+                command: cmd.to_string(),
+                exit_code: real_exit_code,
+                stdout,
+                stderr,
+                duration_ms,
+                verified: is_verified,
+                created_at: Utc::now().to_rfc3339(),
+                output_sha256: output_hash,
+                unverified_reason,
+            };
+            let _ = self
+                .checkpoint_store
+                .record_run_evidence(&evidence_rec)
+                .await;
+
+            let _ = self
+                .checkpoint_store
+                .mark_verified(&scope.run_id.to_string(), is_verified)
+                .await;
+        } else {
+            for art_path in &declared_artifacts {
+                let full_path = self.workspace_root.join(art_path);
+                let (size, hash) = if full_path.exists() {
+                    let bytes = std::fs::read(&full_path).unwrap_or_default();
+                    use sha2::{Digest, Sha256};
+                    let mut hasher = Sha256::new();
+                    hasher.update(&bytes);
+                    (bytes.len() as i64, format!("{:x}", hasher.finalize()))
+                } else {
+                    (0, String::new())
+                };
+                let mime = detect_mime_type(&full_path);
+                let art_rec = crate::checkpoints::types::ArtifactRecord {
+                    id: Uuid::new_v4().to_string(),
+                    run_id: scope.run_id.to_string(),
+                    filename: art_path.clone(),
+                    file_path: full_path.to_string_lossy().to_string(),
+                    file_size: size,
+                    mime_type: mime,
+                    sha256: hash,
+                    verified: false,
+                    created_at: Utc::now().to_rfc3339(),
+                };
+                let _ = self.checkpoint_store.record_artifact(&art_rec).await;
             }
         }
 

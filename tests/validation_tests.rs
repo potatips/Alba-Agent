@@ -268,6 +268,7 @@ fn test_crew_agent_not_found() {
         join: JoinMode::Any,
         expected_artifact_paths: vec![],
         requires_visual_evidence: false,
+        verification_command: None,
     }));
     let err = validate_workflow_spec(&spec).unwrap_err();
     assert!(matches!(err, WorkflowValidationError::AgentNotFound { .. }));
@@ -309,6 +310,7 @@ fn test_hierarchical_crew_manager_not_found() {
         join: JoinMode::Any,
         expected_artifact_paths: vec![],
         requires_visual_evidence: false,
+        verification_command: None,
     }));
     let err = validate_workflow_spec(&spec).unwrap_err();
     assert!(matches!(

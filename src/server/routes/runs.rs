@@ -31,6 +31,8 @@ pub struct RunSummary {
     pub created_at: String,
     pub duration_seconds: f64,
     pub verified: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unverified_reason: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -43,6 +45,8 @@ pub struct RunDetail {
     pub output_data: Option<Value>,
     pub current_node_id: Option<String>,
     pub verified: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unverified_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -83,6 +87,7 @@ pub async fn list_runs_handler(
                 created_at: r.created_at,
                 duration_seconds,
                 verified: r.verified,
+                unverified_reason: r.unverified_reason,
             }
         })
         .collect();
@@ -115,6 +120,7 @@ pub async fn get_run_handler(
         output_data,
         current_node_id: None,
         verified: run.verified,
+        unverified_reason: run.unverified_reason,
     }))
 }
 
@@ -275,6 +281,7 @@ pub async fn fork_run_checkpoint_handler(
         updated_at: now.clone(),
         completed_at: None,
         verified: false,
+        unverified_reason: None,
     };
     let run_b = RunRecord {
         id: branch_b_id.clone(),
@@ -286,6 +293,7 @@ pub async fn fork_run_checkpoint_handler(
         updated_at: now,
         completed_at: None,
         verified: false,
+        unverified_reason: None,
     };
     let _ = state.store.insert_run(&run_a);
     let _ = state.store.insert_run(&run_b);

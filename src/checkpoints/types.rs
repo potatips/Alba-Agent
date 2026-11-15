@@ -90,6 +90,8 @@ pub struct RunRecord {
     pub updated_at: String,
     pub completed_at: Option<String>,
     pub verified: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unverified_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,15 +105,27 @@ pub struct RunEvidenceRecord {
     pub duration_ms: i64,
     pub verified: bool,
     pub created_at: String,
+    #[serde(default)]
+    pub output_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unverified_reason: Option<String>,
 }
 
 impl RunEvidenceRecord {
-    pub fn output_sha256(&self) -> String {
+    pub fn compute_output_sha256(stdout: &str, stderr: &str) -> String {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(self.stdout.as_bytes());
-        hasher.update(self.stderr.as_bytes());
+        hasher.update(stdout.as_bytes());
+        hasher.update(stderr.as_bytes());
         format!("{:x}", hasher.finalize())
+    }
+
+    pub fn output_sha256(&self) -> String {
+        if self.output_sha256.is_empty() {
+            Self::compute_output_sha256(&self.stdout, &self.stderr)
+        } else {
+            self.output_sha256.clone()
+        }
     }
 }
 

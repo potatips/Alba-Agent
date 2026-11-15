@@ -170,4 +170,35 @@ pub trait CheckpointStore: Send + Sync {
         branch_label: &str,
     ) -> impl std::future::Future<Output = Result<(ExecutionScope, TrajectoryBranch), CheckpointError>>
            + Send;
+
+    fn record_run_evidence(
+        &self,
+        record: &crate::checkpoints::types::RunEvidenceRecord,
+    ) -> impl std::future::Future<Output = Result<(), CheckpointError>> + Send {
+        async move {
+            let _ = record;
+            Ok(())
+        }
+    }
+
+    fn record_artifact(
+        &self,
+        artifact: &crate::checkpoints::types::ArtifactRecord,
+    ) -> impl std::future::Future<Output = Result<(), CheckpointError>> + Send {
+        async move {
+            let _ = artifact;
+            Ok(())
+        }
+    }
+
+    fn mark_verified(
+        &self,
+        run_id: &str,
+        verified: bool,
+    ) -> impl std::future::Future<Output = Result<bool, CheckpointError>> + Send {
+        async move {
+            let _ = (run_id, verified);
+            Ok(false)
+        }
+    }
 }

@@ -538,6 +538,41 @@ impl SqliteCheckpointStore {
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
         }
 
+        if current_version < 9 {
+            let has_run_reason: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name = 'unverified_reason'",
+                    [],
+                    |r| r.get::<_, i64>(0).map(|c| c > 0),
+                )
+                .unwrap_or(false);
+
+            if !has_run_reason {
+                let _ = conn.execute("ALTER TABLE runs ADD COLUMN unverified_reason TEXT", []);
+            }
+
+            let has_evidence_reason: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('run_evidence') WHERE name = 'unverified_reason'",
+                    [],
+                    |r| r.get::<_, i64>(0).map(|c| c > 0),
+                )
+                .unwrap_or(false);
+
+            if !has_evidence_reason {
+                let _ = conn.execute(
+                    "ALTER TABLE run_evidence ADD COLUMN unverified_reason TEXT",
+                    [],
+                );
+            }
+
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (9, datetime('now'))",
+                [],
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        }
+
         Ok(())
     }
 
@@ -636,8 +671,8 @@ impl SqliteCheckpointStore {
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
         let verified_int = if run.verified { 1 } else { 0 };
         conn.execute(
-            "INSERT INTO runs (id, workflow_id, status, input_data, output_data, created_at, updated_at, completed_at, verified)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO runs (id, workflow_id, status, input_data, output_data, created_at, updated_at, completed_at, verified, unverified_reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 run.id,
                 run.workflow_id,
@@ -648,6 +683,7 @@ impl SqliteCheckpointStore {
                 run.updated_at,
                 run.completed_at,
                 verified_int,
+                run.unverified_reason,
             ],
         )
         .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
@@ -681,7 +717,7 @@ impl SqliteCheckpointStore {
             .lock()
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
         conn.query_row(
-            "SELECT id, workflow_id, status, input_data, output_data, created_at, updated_at, completed_at, verified
+            "SELECT id, workflow_id, status, input_data, output_data, created_at, updated_at, completed_at, verified, unverified_reason
              FROM runs WHERE id = ?1",
             params![id],
             |r| {
@@ -696,6 +732,7 @@ impl SqliteCheckpointStore {
                     updated_at: r.get(6)?,
                     completed_at: r.get(7)?,
                     verified: verified_int == 1,
+                    unverified_reason: r.get(9)?,
                 })
             },
         )
@@ -716,7 +753,7 @@ impl SqliteCheckpointStore {
         if let Some(wf_id) = workflow_id {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, workflow_id, status, input_data, output_data, created_at, updated_at, completed_at, verified
+                    "SELECT id, workflow_id, status, input_data, output_data, created_at, updated_at, completed_at, verified, unverified_reason
                      FROM runs
                      WHERE workflow_id = ?1
                      ORDER BY created_at DESC
@@ -736,6 +773,7 @@ impl SqliteCheckpointStore {
                         updated_at: r.get(6)?,
                         completed_at: r.get(7)?,
                         verified: verified_int == 1,
+                        unverified_reason: r.get(9)?,
                     })
                 })
                 .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
@@ -745,7 +783,7 @@ impl SqliteCheckpointStore {
         } else {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, workflow_id, status, input_data, output_data, created_at, updated_at, completed_at, verified
+                    "SELECT id, workflow_id, status, input_data, output_data, created_at, updated_at, completed_at, verified, unverified_reason
                      FROM runs
                      ORDER BY created_at DESC
                      LIMIT ?1",
@@ -764,6 +802,7 @@ impl SqliteCheckpointStore {
                         updated_at: r.get(6)?,
                         completed_at: r.get(7)?,
                         verified: verified_int == 1,
+                        unverified_reason: r.get(9)?,
                     })
                 })
                 .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
@@ -785,8 +824,8 @@ impl SqliteCheckpointStore {
         let output_hash = record.output_sha256();
 
         conn.execute(
-            "INSERT INTO run_evidence (id, run_id, command, exit_code, stdout, stderr, duration_ms, verified, created_at, output_sha256)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO run_evidence (id, run_id, command, exit_code, stdout, stderr, duration_ms, verified, created_at, output_sha256, unverified_reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 record.id,
                 record.run_id,
@@ -798,14 +837,22 @@ impl SqliteCheckpointStore {
                 verified_int,
                 record.created_at,
                 output_hash,
+                record.unverified_reason,
             ],
         )
         .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
 
         if record.exit_code != 0 || !record.verified {
+            let reason = record.unverified_reason.clone().unwrap_or_else(|| {
+                if record.exit_code != 0 {
+                    format!("Verification command exited with code {}", record.exit_code)
+                } else {
+                    "Verification command marked unverified".to_string()
+                }
+            });
             let _ = conn.execute(
-                "UPDATE runs SET verified = 0, updated_at = ?2 WHERE id = ?1",
-                params![record.run_id, Utc::now().to_rfc3339()],
+                "UPDATE runs SET verified = 0, unverified_reason = ?2, updated_at = ?3 WHERE id = ?1",
+                params![record.run_id, reason, Utc::now().to_rfc3339()],
             );
         }
 
@@ -823,7 +870,7 @@ impl SqliteCheckpointStore {
 
         let mut stmt = conn
             .prepare(
-                "SELECT id, run_id, command, exit_code, stdout, stderr, duration_ms, verified, created_at
+                "SELECT id, run_id, command, exit_code, stdout, stderr, duration_ms, verified, created_at, output_sha256, unverified_reason
                  FROM run_evidence WHERE run_id = ?1 ORDER BY created_at ASC",
             )
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
@@ -841,6 +888,8 @@ impl SqliteCheckpointStore {
                     duration_ms: r.get(6)?,
                     verified: verified_int == 1,
                     created_at: r.get(8)?,
+                    output_sha256: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
+                    unverified_reason: r.get(10)?,
                 })
             })
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
@@ -858,58 +907,196 @@ impl SqliteCheckpointStore {
             .lock()
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
 
-        if verified {
-            let unverified_count: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM run_evidence WHERE run_id = ?1 AND (exit_code != 0 OR verified = 0)",
-                    params![run_id],
-                    |r| r.get(0),
-                )
-                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        if !verified {
+            let reason = "Verification cleared";
+            let _ = conn.execute(
+                "UPDATE runs SET verified = 0, unverified_reason = coalesce(unverified_reason, ?2), updated_at = ?3 WHERE id = ?1",
+                params![run_id, reason, Utc::now().to_rfc3339()],
+            );
+            return Ok(false);
+        }
 
-            if unverified_count > 0 {
-                conn.execute(
-                    "UPDATE runs SET verified = 0, updated_at = ?2 WHERE id = ?1",
-                    params![run_id, Utc::now().to_rfc3339()],
-                )
-                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let evidence_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM run_evidence WHERE run_id = ?1",
+                params![run_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        if evidence_count == 0 {
+            let reason = "No verification evidence recorded for run";
+            let _ = conn.execute(
+                "UPDATE runs SET verified = 0, unverified_reason = ?2, updated_at = ?3 WHERE id = ?1",
+                params![run_id, reason, Utc::now().to_rfc3339()],
+            );
+            return Ok(false);
+        }
+
+        let (latest_exit, latest_verified): (i32, i64) = conn
+            .query_row(
+                "SELECT exit_code, verified FROM run_evidence WHERE run_id = ?1 ORDER BY created_at DESC, id DESC LIMIT 1",
+                params![run_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        if latest_exit != 0 {
+            let reason = format!(
+                "Latest verification command exited with non-zero code {}",
+                latest_exit
+            );
+            let _ = conn.execute(
+                "UPDATE runs SET verified = 0, unverified_reason = ?2, updated_at = ?3 WHERE id = ?1",
+                params![run_id, reason, Utc::now().to_rfc3339()],
+            );
+            return Ok(false);
+        }
+
+        if latest_verified == 0 {
+            let reason = "Latest verification evidence is marked unverified".to_string();
+            let _ = conn.execute(
+                "UPDATE runs SET verified = 0, unverified_reason = ?2, updated_at = ?3 WHERE id = ?1",
+                params![run_id, reason, Utc::now().to_rfc3339()],
+            );
+            return Ok(false);
+        }
+
+        let unverified_evidence_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM run_evidence WHERE run_id = ?1 AND (exit_code != 0 OR verified = 0)",
+                params![run_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        if unverified_evidence_count > 0 {
+            let reason = "Run contains unverified or non-zero exit evidence records".to_string();
+            let _ = conn.execute(
+                "UPDATE runs SET verified = 0, unverified_reason = ?2, updated_at = ?3 WHERE id = ?1",
+                params![run_id, reason, Utc::now().to_rfc3339()],
+            );
+            return Ok(false);
+        }
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, run_id, filename, file_path, file_size, mime_type, sha256, verified, created_at FROM artifacts WHERE run_id = ?1",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        let artifacts: Vec<ArtifactRecord> = stmt
+            .query_map(params![run_id], |r| {
+                let v: i64 = r.get(7)?;
+                Ok(ArtifactRecord {
+                    id: r.get(0)?,
+                    run_id: r.get(1)?,
+                    filename: r.get(2)?,
+                    file_path: r.get(3)?,
+                    file_size: r.get(4)?,
+                    mime_type: r.get(5)?,
+                    sha256: r.get(6)?,
+                    verified: v == 1,
+                    created_at: r.get(8)?,
+                })
+            })
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        if artifacts.is_empty() {
+            let reason =
+                "Refused verification: forged exit-0 evidence row without artifact records"
+                    .to_string();
+            let _ = conn.execute(
+                "UPDATE runs SET verified = 0, unverified_reason = ?2, updated_at = ?3 WHERE id = ?1",
+                params![run_id, reason, Utc::now().to_rfc3339()],
+            );
+            return Ok(false);
+        }
+
+        use sha2::{Digest, Sha256};
+        for art in &artifacts {
+            if !art.verified {
+                let reason = format!("Artifact '{}' is marked unverified", art.filename);
+                let _ = conn.execute(
+                    "UPDATE runs SET verified = 0, unverified_reason = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![run_id, reason, Utc::now().to_rfc3339()],
+                );
                 return Ok(false);
             }
 
-            let evidence_count: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM run_evidence WHERE run_id = ?1",
-                    params![run_id],
-                    |r| r.get(0),
-                )
-                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let path = Path::new(&art.file_path);
+            let target = if path.exists() {
+                path.to_path_buf()
+            } else {
+                let fallback = Path::new(&art.filename);
+                if fallback.exists() {
+                    fallback.to_path_buf()
+                } else {
+                    let reason = format!(
+                        "Artifact '{}' file missing on disk at '{}'",
+                        art.filename, art.file_path
+                    );
+                    let _ = conn.execute(
+                        "UPDATE runs SET verified = 0, unverified_reason = ?2, updated_at = ?3 WHERE id = ?1",
+                        params![run_id, reason, Utc::now().to_rfc3339()],
+                    );
+                    return Ok(false);
+                }
+            };
 
-            if evidence_count == 0 {
+            let bytes = match std::fs::read(&target) {
+                Ok(b) => b,
+                Err(e) => {
+                    let reason = format!("Cannot read artifact '{}' on disk: {}", art.filename, e);
+                    let _ = conn.execute(
+                        "UPDATE runs SET verified = 0, unverified_reason = ?2, updated_at = ?3 WHERE id = ?1",
+                        params![run_id, reason, Utc::now().to_rfc3339()],
+                    );
+                    return Ok(false);
+                }
+            };
+
+            if bytes.len() as i64 != art.file_size {
+                let reason = format!(
+                    "Artifact '{}' size mismatch: recorded {} bytes, disk {} bytes",
+                    art.filename,
+                    art.file_size,
+                    bytes.len()
+                );
+                let _ = conn.execute(
+                    "UPDATE runs SET verified = 0, unverified_reason = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![run_id, reason, Utc::now().to_rfc3339()],
+                );
                 return Ok(false);
             }
 
-            let unverified_artifacts: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM artifacts WHERE run_id = ?1 AND verified = 0",
-                    params![run_id],
-                    |r| r.get(0),
-                )
-                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            let current_hash = format!("{:x}", hasher.finalize());
 
-            if unverified_artifacts > 0 {
+            if current_hash != art.sha256 {
+                let reason = format!(
+                    "Artifact '{}' SHA-256 hash mismatch: recorded {}, disk {}",
+                    art.filename, art.sha256, current_hash
+                );
+                let _ = conn.execute(
+                    "UPDATE runs SET verified = 0, unverified_reason = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![run_id, reason, Utc::now().to_rfc3339()],
+                );
                 return Ok(false);
             }
         }
 
-        let val = if verified { 1 } else { 0 };
         let updated = conn
             .execute(
-                "UPDATE runs SET verified = ?2, updated_at = ?3 WHERE id = ?1",
-                params![run_id, val, Utc::now().to_rfc3339()],
+                "UPDATE runs SET verified = 1, unverified_reason = NULL, updated_at = ?2 WHERE id = ?1",
+                params![run_id, Utc::now().to_rfc3339()],
             )
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
 
-        Ok(updated > 0 && verified)
+        Ok(updated > 0)
     }
 
     pub fn is_run_verified(&self, run_id: &str) -> Result<bool, CheckpointError> {
@@ -3024,5 +3211,17 @@ impl CheckpointStore for SqliteCheckpointStore {
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
 
         Ok((forked_scope, branch))
+    }
+
+    async fn record_run_evidence(&self, record: &RunEvidenceRecord) -> Result<(), CheckpointError> {
+        self.insert_run_evidence(record)
+    }
+
+    async fn record_artifact(&self, artifact: &ArtifactRecord) -> Result<(), CheckpointError> {
+        self.insert_artifact(artifact)
+    }
+
+    async fn mark_verified(&self, run_id: &str, verified: bool) -> Result<bool, CheckpointError> {
+        self.mark_run_verified(run_id, verified)
     }
 }

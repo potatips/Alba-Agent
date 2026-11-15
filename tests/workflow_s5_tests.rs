@@ -131,6 +131,7 @@ async fn test_router_loopback_bounded_execution() {
                 join: JoinMode::Any,
                 expected_artifact_paths: vec![],
                 requires_visual_evidence: false,
+                verification_command: None,
             }),
             WorkflowNode::Router(RouterNodeSpec {
                 id: "router".to_string(),
@@ -250,6 +251,7 @@ async fn test_router_max_loop_iterations_exceeded_fails() {
                 join: JoinMode::Any,
                 expected_artifact_paths: vec![],
                 requires_visual_evidence: false,
+                verification_command: None,
             }),
             WorkflowNode::Router(RouterNodeSpec {
                 id: "router".to_string(),
@@ -370,6 +372,7 @@ async fn test_parallel_branch_execution() {
                 join: JoinMode::Any,
                 expected_artifact_paths: vec![],
                 requires_visual_evidence: false,
+                verification_command: None,
             }),
             WorkflowNode::Crew(CrewNodeSpec {
                 id: "branch_b".to_string(),
@@ -382,6 +385,7 @@ async fn test_parallel_branch_execution() {
                 join: JoinMode::Any,
                 expected_artifact_paths: vec![],
                 requires_visual_evidence: false,
+                verification_command: None,
             }),
             WorkflowNode::End(EndNodeSpec {
                 id: "end".to_string(),

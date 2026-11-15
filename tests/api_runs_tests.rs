@@ -124,6 +124,7 @@ fn create_crew_workflow(wf_id: Uuid, crew_id: &str) -> WorkflowSpec {
                 join: JoinMode::Any,
                 expected_artifact_paths: vec![],
                 requires_visual_evidence: false,
+                verification_command: None,
             }),
             WorkflowNode::End(EndNodeSpec {
                 id: "end".to_string(),
@@ -201,6 +202,7 @@ async fn test_api_resume_consumed_tool_not_reexecuted() {
         updated_at: now.clone(),
         completed_at: None,
         verified: false,
+        unverified_reason: None,
     };
     store.insert_run(&run_rec).unwrap();
 
@@ -327,6 +329,7 @@ async fn test_api_resume_executing_tool_fails_closed() {
         updated_at: now.clone(),
         completed_at: None,
         verified: false,
+        unverified_reason: None,
     };
     store.insert_run(&run_rec).unwrap();
 
@@ -500,6 +503,7 @@ async fn test_api_resume_completed_run_rejected() {
         updated_at: now.clone(),
         completed_at: Some(now),
         verified: false,
+        unverified_reason: None,
     };
     store.insert_run(&run_rec).unwrap();
 
@@ -536,6 +540,7 @@ async fn test_api_cancel_run() {
         updated_at: now.clone(),
         completed_at: None,
         verified: false,
+        unverified_reason: None,
     };
     store.insert_run(&run_rec).unwrap();
 
@@ -578,6 +583,7 @@ async fn test_api_checkpoints_fork_rewind_artifacts() {
         updated_at: now.clone(),
         completed_at: None,
         verified: false,
+        unverified_reason: None,
     };
     store.insert_run(&run_rec).unwrap();
 

@@ -83,6 +83,8 @@ pub struct CrewNodeSpec {
     pub expected_artifact_paths: Vec<String>,
     #[serde(default)]
     pub requires_visual_evidence: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -252,6 +254,43 @@ impl WorkflowNode {
             Self::Rag(n) => &n.id,
             Self::End(n) => &n.id,
             Self::ParallelBranch(n) => &n.id,
+        }
+    }
+
+    pub fn verification_command(&self) -> Option<&str> {
+        match self {
+            Self::Crew(n) => n
+                .verification_command
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty()),
+            Self::Sandbox(n) => {
+                let cmd = n.verification_command.trim();
+                if cmd.is_empty() {
+                    None
+                } else {
+                    Some(cmd)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub fn expected_artifact_paths(&self) -> Vec<String> {
+        match self {
+            Self::Crew(n) => {
+                let mut paths = n.expected_artifact_paths.clone();
+                for t in &n.tasks {
+                    for p in &t.expected_artifact_paths {
+                        if !paths.contains(p) {
+                            paths.push(p.clone());
+                        }
+                    }
+                }
+                paths
+            }
+            Self::Sandbox(n) => n.expected_artifact_paths.clone(),
+            _ => vec![],
         }
     }
 }

@@ -30,6 +30,7 @@ pub fn generate_seatbelt_profile(canonical_ws: &Path, policy: &SandboxPolicy) ->
          (allow file-ioctl)\n\
          (allow ipc-posix-shm*)\n\
          (allow file-read*\n\
+           (literal \"/\")\n\
            (subpath \"/usr\")\n\
            (subpath \"/bin\")\n\
            (subpath \"/sbin\")\n\

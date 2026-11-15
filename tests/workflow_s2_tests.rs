@@ -129,6 +129,7 @@ fn create_two_agent_crew_spec() -> WorkflowSpec {
                 join: JoinMode::Any,
                 expected_artifact_paths: vec![],
                 requires_visual_evidence: false,
+                verification_command: None,
             }),
             WorkflowNode::End(EndNodeSpec {
                 id: "end".to_string(),

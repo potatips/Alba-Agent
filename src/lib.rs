@@ -4,6 +4,7 @@ pub mod cli;
 pub mod domain;
 pub mod events;
 pub mod governance;
+pub mod memory;
 pub mod models;
 pub mod sandbox;
 pub mod schema;

@@ -206,6 +206,82 @@ pub struct CapsuleRecord {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeCapsuleRecord {
+    pub id: String,
+    pub tenant_id: String,
+    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_run_id: Option<String>,
+    pub source_agent_id: String,
+    pub source_role: String,
+    #[serde(default)]
+    pub source_domain_tags: Vec<String>,
+    pub trigger_preconditions: String,
+    pub distilled_heuristic: String,
+    #[serde(default)]
+    pub prohibited_contexts: Vec<String>,
+    pub propagation_scope: String,
+    pub sensitivity_level: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_workflow_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_crew_id: Option<String>,
+    #[serde(default = "default_capsule_confidence")]
+    pub confidence: f64,
+    #[serde(default)]
+    pub negative_transfer: bool,
+    pub created_at: String,
+}
+
+fn default_capsule_confidence() -> f64 {
+    0.5
+}
+
+impl KnowledgeCapsuleRecord {
+    pub fn from_spec(
+        spec: &crate::schema::capsule::KnowledgeCapsuleSpec,
+        source_run_id: Option<String>,
+    ) -> Self {
+        let prop_scope = match spec.propagation_scope {
+            crate::schema::workflow::PropagationScope::AgentPrivate => "AGENT_PRIVATE",
+            crate::schema::workflow::PropagationScope::CrewLocal => "CREW_LOCAL",
+            crate::schema::workflow::PropagationScope::WorkflowScoped => "WORKFLOW_SCOPED",
+            crate::schema::workflow::PropagationScope::WorkspaceQuarantine => {
+                "WORKSPACE_QUARANTINE"
+            }
+            crate::schema::workflow::PropagationScope::WorkspaceVerified => "WORKSPACE_VERIFIED",
+        };
+        let sens_level = match spec.sensitivity_level {
+            crate::schema::workflow::SensitivityLevel::Public => "PUBLIC",
+            crate::schema::workflow::SensitivityLevel::Internal => "INTERNAL",
+            crate::schema::workflow::SensitivityLevel::ConfidentialPiiStripped => {
+                "CONFIDENTIAL_PII_STRIPPED"
+            }
+        };
+
+        Self {
+            id: spec.capsule_id.to_string(),
+            tenant_id: spec.tenant_id.to_string(),
+            workspace_id: spec.workspace_id.to_string(),
+            source_run_id,
+            source_agent_id: spec.source_agent_id.clone(),
+            source_role: spec.source_role.clone(),
+            source_domain_tags: spec.source_domain_tags.clone(),
+            trigger_preconditions: spec.trigger_preconditions.clone(),
+            distilled_heuristic: spec.distilled_heuristic.clone(),
+            prohibited_contexts: spec.prohibited_contexts.clone(),
+            propagation_scope: prop_scope.to_string(),
+            sensitivity_level: sens_level.to_string(),
+            source_workflow_id: spec.source_workflow_id.map(|u| u.to_string()),
+            source_crew_id: spec.source_crew_id.clone(),
+            confidence: spec.confidence,
+            negative_transfer: false,
+            created_at: Utc::now().to_rfc3339(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionPolicyRecord {
     pub default_mode: String,

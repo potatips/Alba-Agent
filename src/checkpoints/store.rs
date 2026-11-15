@@ -209,4 +209,39 @@ pub trait CheckpointStore: Send + Sync {
     > + Send {
         async move { Ok(crate::checkpoints::types::ExecutionPolicyRecord::default()) }
     }
+
+    fn insert_knowledge_capsule(
+        &self,
+        capsule: &crate::checkpoints::types::KnowledgeCapsuleRecord,
+    ) -> impl std::future::Future<Output = Result<(), CheckpointError>> + Send {
+        async move {
+            let _ = capsule;
+            Ok(())
+        }
+    }
+
+    fn get_knowledge_capsule(
+        &self,
+        id: &str,
+    ) -> impl std::future::Future<
+        Output = Result<Option<crate::checkpoints::types::KnowledgeCapsuleRecord>, CheckpointError>,
+    > + Send {
+        async move {
+            let _ = id;
+            Ok(None)
+        }
+    }
+
+    fn list_knowledge_capsules(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+    ) -> impl std::future::Future<
+        Output = Result<Vec<crate::checkpoints::types::KnowledgeCapsuleRecord>, CheckpointError>,
+    > + Send {
+        async move {
+            let _ = (tenant_id, workspace_id);
+            Ok(Vec::new())
+        }
+    }
 }

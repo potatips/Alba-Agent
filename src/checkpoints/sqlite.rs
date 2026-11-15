@@ -13,8 +13,8 @@ use uuid::Uuid;
 use crate::checkpoints::store::{CheckpointError, CheckpointStore};
 use crate::checkpoints::types::{
     ArtifactRecord, AuditLogEntry, CapsuleRecord, ExecutionPolicyRecord, ForkRunRequest,
-    RunCheckpoint, RunEvidenceRecord, RunRecord, TrajectoryBranch, WorkflowStepCheckpoint,
-    WorkflowSummary,
+    KnowledgeCapsuleRecord, RunCheckpoint, RunEvidenceRecord, RunRecord, TrajectoryBranch,
+    WorkflowStepCheckpoint, WorkflowSummary,
 };
 use crate::domain::{
     ActionIntentKind, ApprovalDecision, ApprovalRequest, ApprovalStatus, ChatMessage,
@@ -569,6 +569,62 @@ impl SqliteCheckpointStore {
             conn.execute(
                 "INSERT INTO schema_migrations (version, applied_at) VALUES (9, datetime('now'))",
                 [],
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        }
+
+        if current_version < 10 {
+            let has_capsule_tenant: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('capsules') WHERE name = 'tenant_id'",
+                    [],
+                    |r| r.get::<_, i64>(0).map(|c| c > 0),
+                )
+                .unwrap_or(false);
+
+            if !has_capsule_tenant {
+                conn.execute(
+                    "ALTER TABLE capsules ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''",
+                    [],
+                )
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+                conn.execute(
+                    "ALTER TABLE capsules ADD COLUMN workspace_id TEXT NOT NULL DEFAULT ''",
+                    [],
+                )
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+                conn.execute("ALTER TABLE capsules ADD COLUMN source_run_id TEXT", [])
+                    .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            }
+
+            conn.execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS knowledge_capsules (
+                    id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL,
+                    source_run_id TEXT,
+                    source_agent_id TEXT NOT NULL,
+                    source_role TEXT NOT NULL,
+                    source_domain_tags_json TEXT NOT NULL,
+                    trigger_preconditions TEXT NOT NULL,
+                    distilled_heuristic TEXT NOT NULL,
+                    prohibited_contexts_json TEXT NOT NULL,
+                    propagation_scope TEXT NOT NULL,
+                    sensitivity_level TEXT NOT NULL,
+                    source_workflow_id TEXT,
+                    source_crew_id TEXT,
+                    confidence REAL NOT NULL DEFAULT 0.5,
+                    negative_transfer INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_knowledge_capsules_scope ON knowledge_capsules(tenant_id, workspace_id);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_capsules_run ON knowledge_capsules(source_run_id);
+
+                INSERT INTO schema_migrations (version, applied_at)
+                VALUES (10, datetime('now'));
+                ",
             )
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
         }
@@ -1290,6 +1346,264 @@ impl SqliteCheckpointStore {
             out.push(r.map_err(|e| CheckpointError::DatabaseError(e.to_string()))?);
         }
         Ok(out)
+    }
+
+    pub fn insert_knowledge_capsule(
+        &self,
+        capsule: &KnowledgeCapsuleRecord,
+    ) -> Result<(), CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let tags_json = serde_json::to_string(&capsule.source_domain_tags)
+            .map_err(|e| CheckpointError::SerializationError(e.to_string()))?;
+        let prohibited_json = serde_json::to_string(&capsule.prohibited_contexts)
+            .map_err(|e| CheckpointError::SerializationError(e.to_string()))?;
+
+        conn.execute(
+            "INSERT INTO knowledge_capsules (
+                id, tenant_id, workspace_id, source_run_id, source_agent_id, source_role,
+                source_domain_tags_json, trigger_preconditions, distilled_heuristic,
+                prohibited_contexts_json, propagation_scope, sensitivity_level,
+                source_workflow_id, source_crew_id, confidence, negative_transfer, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            params![
+                capsule.id,
+                capsule.tenant_id,
+                capsule.workspace_id,
+                capsule.source_run_id,
+                capsule.source_agent_id,
+                capsule.source_role,
+                tags_json,
+                capsule.trigger_preconditions,
+                capsule.distilled_heuristic,
+                prohibited_json,
+                capsule.propagation_scope,
+                capsule.sensitivity_level,
+                capsule.source_workflow_id,
+                capsule.source_crew_id,
+                capsule.confidence,
+                if capsule.negative_transfer { 1 } else { 0 },
+                capsule.created_at,
+            ],
+        )
+        .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn get_knowledge_capsule(
+        &self,
+        id: &str,
+    ) -> Result<Option<KnowledgeCapsuleRecord>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, tenant_id, workspace_id, source_run_id, source_agent_id, source_role,
+                        source_domain_tags_json, trigger_preconditions, distilled_heuristic,
+                        prohibited_contexts_json, propagation_scope, sensitivity_level,
+                        source_workflow_id, source_crew_id, confidence, negative_transfer, created_at
+                 FROM knowledge_capsules
+                 WHERE id = ?1",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut rows = stmt
+            .query_map([id], |r| {
+                let tags_str: String = r.get(6)?;
+                let prohibited_str: String = r.get(9)?;
+                let neg_i: i64 = r.get(15)?;
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                    tags_str,
+                    r.get::<_, String>(7)?,
+                    r.get::<_, String>(8)?,
+                    prohibited_str,
+                    r.get::<_, String>(10)?,
+                    r.get::<_, String>(11)?,
+                    r.get::<_, Option<String>>(12)?,
+                    r.get::<_, Option<String>>(13)?,
+                    r.get::<_, f64>(14)?,
+                    neg_i != 0,
+                    r.get::<_, String>(16)?,
+                ))
+            })
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        if let Some(res) = rows.next() {
+            let (
+                id,
+                tenant_id,
+                workspace_id,
+                source_run_id,
+                source_agent_id,
+                source_role,
+                tags_str,
+                trigger_preconditions,
+                distilled_heuristic,
+                prohibited_str,
+                propagation_scope,
+                sensitivity_level,
+                source_workflow_id,
+                source_crew_id,
+                confidence,
+                negative_transfer,
+                created_at,
+            ) = res.map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let source_domain_tags: Vec<String> =
+                serde_json::from_str(&tags_str).unwrap_or_default();
+            let prohibited_contexts: Vec<String> =
+                serde_json::from_str(&prohibited_str).unwrap_or_default();
+
+            Ok(Some(KnowledgeCapsuleRecord {
+                id,
+                tenant_id,
+                workspace_id,
+                source_run_id,
+                source_agent_id,
+                source_role,
+                source_domain_tags,
+                trigger_preconditions,
+                distilled_heuristic,
+                prohibited_contexts,
+                propagation_scope,
+                sensitivity_level,
+                source_workflow_id,
+                source_crew_id,
+                confidence,
+                negative_transfer,
+                created_at,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn list_knowledge_capsules(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+    ) -> Result<Vec<KnowledgeCapsuleRecord>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, tenant_id, workspace_id, source_run_id, source_agent_id, source_role,
+                        source_domain_tags_json, trigger_preconditions, distilled_heuristic,
+                        prohibited_contexts_json, propagation_scope, sensitivity_level,
+                        source_workflow_id, source_crew_id, confidence, negative_transfer, created_at
+                 FROM knowledge_capsules
+                 WHERE tenant_id = ?1 AND workspace_id = ?2
+                 ORDER BY created_at DESC",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![tenant_id, workspace_id], |r| {
+                let tags_str: String = r.get(6)?;
+                let prohibited_str: String = r.get(9)?;
+                let neg_i: i64 = r.get(15)?;
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                    tags_str,
+                    r.get::<_, String>(7)?,
+                    r.get::<_, String>(8)?,
+                    prohibited_str,
+                    r.get::<_, String>(10)?,
+                    r.get::<_, String>(11)?,
+                    r.get::<_, Option<String>>(12)?,
+                    r.get::<_, Option<String>>(13)?,
+                    r.get::<_, f64>(14)?,
+                    neg_i != 0,
+                    r.get::<_, String>(16)?,
+                ))
+            })
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        let mut res = Vec::new();
+        for row in rows {
+            let (
+                id,
+                tenant_id,
+                workspace_id,
+                source_run_id,
+                source_agent_id,
+                source_role,
+                tags_str,
+                trigger_preconditions,
+                distilled_heuristic,
+                prohibited_str,
+                propagation_scope,
+                sensitivity_level,
+                source_workflow_id,
+                source_crew_id,
+                confidence,
+                negative_transfer,
+                created_at,
+            ) = row.map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let source_domain_tags: Vec<String> =
+                serde_json::from_str(&tags_str).unwrap_or_default();
+            let prohibited_contexts: Vec<String> =
+                serde_json::from_str(&prohibited_str).unwrap_or_default();
+
+            res.push(KnowledgeCapsuleRecord {
+                id,
+                tenant_id,
+                workspace_id,
+                source_run_id,
+                source_agent_id,
+                source_role,
+                source_domain_tags,
+                trigger_preconditions,
+                distilled_heuristic,
+                prohibited_contexts,
+                propagation_scope,
+                sensitivity_level,
+                source_workflow_id,
+                source_crew_id,
+                confidence,
+                negative_transfer,
+                created_at,
+            });
+        }
+        Ok(res)
+    }
+
+    pub fn set_knowledge_capsule_negative_transfer(
+        &self,
+        id: &str,
+        negative: bool,
+    ) -> Result<(), CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let rows_affected = conn
+            .execute(
+                "UPDATE knowledge_capsules SET negative_transfer = ?1 WHERE id = ?2",
+                params![if negative { 1 } else { 0 }, id],
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        if rows_affected == 0 {
+            return Err(CheckpointError::NotFound(format!(
+                "Knowledge capsule {} not found",
+                id
+            )));
+        }
+        Ok(())
     }
 
     pub fn get_execution_policy(&self) -> Result<ExecutionPolicyRecord, CheckpointError> {
@@ -3227,5 +3541,27 @@ impl CheckpointStore for SqliteCheckpointStore {
 
     async fn get_execution_policy(&self) -> Result<ExecutionPolicyRecord, CheckpointError> {
         self.get_execution_policy()
+    }
+
+    async fn insert_knowledge_capsule(
+        &self,
+        capsule: &KnowledgeCapsuleRecord,
+    ) -> Result<(), CheckpointError> {
+        self.insert_knowledge_capsule(capsule)
+    }
+
+    async fn get_knowledge_capsule(
+        &self,
+        id: &str,
+    ) -> Result<Option<KnowledgeCapsuleRecord>, CheckpointError> {
+        self.get_knowledge_capsule(id)
+    }
+
+    async fn list_knowledge_capsules(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+    ) -> Result<Vec<KnowledgeCapsuleRecord>, CheckpointError> {
+        self.list_knowledge_capsules(tenant_id, workspace_id)
     }
 }

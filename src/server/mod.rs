@@ -4,9 +4,13 @@ pub mod routes;
 pub mod state;
 pub mod workflow_runner;
 
+use axum::extract::{Request, State};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
+use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
 
 use crate::server::error::fallback_404;
 use crate::server::routes::approvals::{list_approvals_handler, resolve_approval_handler};
@@ -98,9 +102,40 @@ pub fn create_app(state: AppState) -> Router {
         )
         .route("/api/v1/tools/builtin", get(list_builtin_tools_handler))
         .route("/api/v1/skills", get(list_skills_handler))
-        .fallback(fallback_404)
+        .fallback(handle_fallback)
         .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+async fn handle_fallback(
+    State(state): State<AppState>,
+    uri: axum::http::Uri,
+    req: Request,
+) -> Response {
+    let path = uri.path();
+    if path.starts_with("/api/") {
+        return fallback_404().await.into_response();
+    }
+    if let Some(ref static_dir) = state.static_dir {
+        if static_dir.exists() {
+            let trimmed = path.trim_start_matches('/');
+            let html_candidate = static_dir.join(format!("{}.html", trimmed));
+            if html_candidate.is_file() {
+                match ServeFile::new(html_candidate).oneshot(req).await {
+                    Ok(res) => return res.into_response(),
+                    Err(_) => return fallback_404().await.into_response(),
+                }
+            } else {
+                let service = ServeDir::new(static_dir)
+                    .fallback(ServeFile::new(static_dir.join("index.html")));
+                match service.oneshot(req).await {
+                    Ok(res) => return res.into_response(),
+                    Err(_) => return fallback_404().await.into_response(),
+                }
+            }
+        }
+    }
+    fallback_404().await.into_response()
 }
 
 pub async fn serve_app(

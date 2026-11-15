@@ -57,6 +57,9 @@ pub struct ServeArgs {
 
     #[arg(long)]
     pub workspace_root: Option<PathBuf>,
+
+    #[arg(long)]
+    pub static_dir: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -1002,7 +1005,10 @@ pub async fn handle_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Err
     let db_path = args.db.unwrap_or_else(|| PathBuf::from("checkpoints.db"));
     let store = Arc::new(SqliteCheckpointStore::new(&db_path)?);
     let workspace_root = args.workspace_root.unwrap_or_else(|| PathBuf::from("."));
-    let state = crate::server::state::AppState::new(store, workspace_root);
+    let mut state = crate::server::state::AppState::new(store, workspace_root);
+    if let Some(s) = args.static_dir {
+        state = state.with_static_dir(s);
+    }
     let addr = format!("{}:{}", args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     println!("Alba server listening on http://{}", addr);

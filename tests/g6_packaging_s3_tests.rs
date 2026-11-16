@@ -1,8 +1,19 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
+
+struct ChildGuard(Option<Child>);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
 
 use nexus_albaai::checkpoints::SqliteCheckpointStore;
 use nexus_albaai::schema::node::{ApprovalGateNodeSpec, EndNodeSpec, StartNodeSpec, WorkflowNode};
@@ -67,11 +78,15 @@ async fn test_second_launch_focuses_first_and_exits_cleanly() {
 
     assert!(bin_path.exists());
 
-    let mut child1 = Command::new(&bin_path)
+    let child1 = Command::new(&bin_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .env("ALBA_DATA_DIR", &data_dir)
         .env("ALBA_STATIC_DIR", &static_dir)
         .spawn()
         .expect("failed to spawn child1");
+
+    let _guard1 = ChildGuard(Some(child1));
 
     let port_file = data_dir.join("backend_port");
     let port1 = wait_for_port(&port_file).await;
@@ -85,6 +100,8 @@ async fn test_second_launch_focuses_first_and_exits_cleanly() {
     assert_eq!(h1.status(), reqwest::StatusCode::OK);
 
     let mut child2 = Command::new(&bin_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .env("ALBA_DATA_DIR", &data_dir)
         .env("ALBA_STATIC_DIR", &static_dir)
         .spawn()
@@ -106,9 +123,6 @@ async fn test_second_launch_focuses_first_and_exits_cleanly() {
         reqwest::StatusCode::OK,
         "first instance must stay alive after second instance exits"
     );
-
-    let _ = child1.kill();
-    let _ = child1.wait();
 }
 
 #[tokio::test]

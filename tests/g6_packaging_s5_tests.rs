@@ -1,6 +1,17 @@
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
+
+struct ChildGuard(Option<Child>);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
 
 #[tokio::test]
 async fn test_release_bundle_execution_and_process_tree() {
@@ -28,14 +39,17 @@ async fn test_release_bundle_execution_and_process_tree() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_path_buf();
 
-    let mut child = Command::new(&bin_path)
+    let child = Command::new(&bin_path)
         .arg("-ApplePersistenceIgnoreState")
         .arg("YES")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .env("ALBA_DATA_DIR", &data_dir)
         .spawn()
         .expect("failed to spawn bundle executable");
 
     let pid = child.id();
+    let _guard = ChildGuard(Some(child));
     let port_file = data_dir.join("backend_port");
 
     let mut port: Option<u16> = None;
@@ -98,7 +112,4 @@ async fn test_release_bundle_execution_and_process_tree() {
             );
         }
     }
-
-    let _ = child.kill();
-    let _ = child.wait();
 }

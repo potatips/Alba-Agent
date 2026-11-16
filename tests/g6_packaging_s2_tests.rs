@@ -1,6 +1,17 @@
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
+
+struct ChildGuard(Option<Child>);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
 
 #[tokio::test]
 async fn test_tauri_shell_scripted_launch_and_process_tree() {
@@ -44,13 +55,16 @@ async fn test_tauri_shell_scripted_launch_and_process_tree() {
         bin_path
     );
 
-    let mut child = Command::new(&bin_path)
+    let child = Command::new(&bin_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .env("ALBA_DATA_DIR", &data_dir)
         .env("ALBA_STATIC_DIR", &static_dir)
         .spawn()
         .expect("failed to spawn alba-agent");
 
     let pid = child.id();
+    let _guard = ChildGuard(Some(child));
     let port_file = data_dir.join("backend_port");
 
     let mut port: Option<u16> = None;
@@ -110,7 +124,4 @@ async fn test_tauri_shell_scripted_launch_and_process_tree() {
             );
         }
     }
-
-    let _ = child.kill();
-    let _ = child.wait();
 }

@@ -37,182 +37,114 @@ export type { NavPage } from "@/components/shell/shell-context";
 
 const emptyScope = { tenant_id: "", workspace_id: "" };
 
-function AccountDialog({ token, scope, onToken, onScope, onClose }: { token: string; scope: WorkspaceScope; onToken: (value: string) => void; onScope: (value: WorkspaceScope) => void; onClose: () => void }) {
-  const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [error, setError] = useState(""); const [busy, setBusy] = useState(false); const [registering, setRegistering] = useState(false);
-  const [publicSignup, setPublicSignup] = useState<boolean | null>(null);
-  const [oauthWaiting, setOauthWaiting] = useState<"google" | "github" | null>(null);
-  const [registration, setRegistration] = useState({ tenant_name: "My organization", workspace_name: "My workspace", display_name: "Workspace owner", setup_token: "" });
-  const desktop = getDesktop();
-  const isDesktop = Boolean(desktop);
+export type AuthUser = {
+  sub: string;
+  email: string | null;
+  name: string | null;
+  picture: string | null;
+  tenant_id: string;
+  workspace_id: string;
+};
+
+export type AuthSession = {
+  authenticated: boolean;
+  user: AuthUser | null;
+  has_unclaimed_legacy_data: boolean;
+};
+
+function AccountDialog({
+  onSessionUpdated,
+  onClose,
+}: {
+  onSessionUpdated: () => Promise<void>;
+  onClose: () => void;
+}) {
+  const { t } = useLocale();
+  const [busy, setBusy] = useState(false);
+  const [waiting, setWaiting] = useState(false);
+  const [error, setError] = useState("");
+  const pollRef = useRef<number | null>(null);
 
   useEffect(() => {
-    if (!desktop?.onOAuthCallback) return;
-    const exchange = async (code: string) => {
-      setBusy(true);
-      setError("");
-      try {
-        const result = await apiRequest<{ access_token: string; tenant_id: string; workspace_id: string; plan?: string }>(
-          "/api/v1/auth/oauth/exchange",
-          "",
-          { method: "POST", body: JSON.stringify({ code }) }
-        );
-        if (result.tenant_id && result.workspace_id) {
-          onScope({ tenant_id: result.tenant_id, workspace_id: result.workspace_id });
-        }
-        if (result.plan) {
-          try { window.localStorage.setItem("nexus_user_plan", result.plan); } catch { /* localStorage may be disabled */ }
-        }
-        onToken(result.access_token);
-        onClose();
-      } catch (reason) {
-        setError(readError(reason));
-      } finally {
-        setBusy(false);
-        setOauthWaiting(null);
+    return () => {
+      if (pollRef.current !== null) {
+        window.clearInterval(pollRef.current);
       }
     };
+  }, []);
 
-    desktop.getPendingOAuth?.().then((pending) => {
-      if (pending?.code) void exchange(pending.code);
-    }).catch(() => {});
-
-    const unsubscribe = desktop.onOAuthCallback(({ code }) => {
-      void exchange(code);
-    });
-    return unsubscribe;
-  }, [desktop, onScope, onToken, onClose]);
-
-  const startOAuth = async (provider: "google" | "github") => {
-    if (!desktop?.startOAuth) return;
+  const startGoogleSignIn = async () => {
     setBusy(true);
     setError("");
-    setOauthWaiting(provider);
     try {
-      await desktop.startOAuth(provider);
-    } catch (err) {
-      setError(readError(err));
+      const start = await apiRequest<{ auth_url: string; state: string; handoff_id: string }>(
+        "/api/v1/auth/google/start",
+        "",
+        { method: "POST" }
+      );
+      if (typeof window !== "undefined") {
+        window.open(start.auth_url, "_blank");
+      }
+      setWaiting(true);
+
+      if (pollRef.current !== null) {
+        window.clearInterval(pollRef.current);
+      }
+      pollRef.current = window.setInterval(async () => {
+        try {
+          const res = await apiRequest<{ status: string }>(
+            "/api/v1/auth/google/handoff",
+            "",
+            { method: "POST", body: JSON.stringify({ handoff_id: start.handoff_id }) }
+          );
+          if (res && res.status === "ready") {
+            if (pollRef.current !== null) {
+              window.clearInterval(pollRef.current);
+              pollRef.current = null;
+            }
+            await onSessionUpdated();
+            onClose();
+          }
+        } catch {
+          // Keep polling while waiting for callback
+        }
+      }, 1500);
+    } catch (reason) {
+      setError(readError(reason));
       setBusy(false);
-      setOauthWaiting(null);
+      setWaiting(false);
     }
   };
 
-  useEffect(() => {
-    void apiRequest<{ public_signup_enabled: boolean }>("/api/v1/auth/signup-options", "")
-      .then((result) => setPublicSignup(result.public_signup_enabled))
-      .catch(() => setPublicSignup(false));
-  }, []);
-  const effectivePublicSignup = isDesktop || Boolean(publicSignup);
-  const signIn = async () => {
-    setBusy(true); setError("");
-    try {
-      const result = await apiRequest<{ access_token: string; tenant_id?: string; workspace_id?: string; plan?: string }>(effectivePublicSignup ? "/api/v1/auth/login" : "/api/v1/auth/token", "", { method: "POST", body: JSON.stringify(effectivePublicSignup ? { email, password } : { ...scope, email, password }) });
-      if (result.tenant_id && result.workspace_id) onScope({ tenant_id: result.tenant_id, workspace_id: result.workspace_id });
-      if (result.plan) {
-        try { window.localStorage.setItem("nexus_user_plan", result.plan); } catch { /* ignore */ }
-      }
-      onToken(result.access_token); onClose();
-    } catch (reason) { setError(readError(reason)); }
-    finally { setBusy(false); }
-  };
-  const register = async () => {
-    setBusy(true); setError("");
-    try {
-      const result = await apiRequest<{ access_token: string; tenant_id: string; workspace_id: string; plan?: string }>(effectivePublicSignup ? "/api/v1/auth/signup" : "/api/v1/auth/register", "", { method: "POST", body: JSON.stringify(effectivePublicSignup ? { tenant_name: registration.tenant_name || "My organization", workspace_name: registration.workspace_name || "My workspace", display_name: registration.display_name || "Workspace owner", email, password } : { ...registration, email, password }) });
-      onScope({ tenant_id: result.tenant_id, workspace_id: result.workspace_id });
-      if (result.plan) {
-        try { window.localStorage.setItem("nexus_user_plan", result.plan); } catch { /* ignore */ }
-      }
-      onToken(result.access_token); onClose();
-    } catch (reason) { setError(readError(reason)); }
-    finally { setBusy(false); }
-  };
-  if (!isDesktop && publicSignup === null) return <Dialog title="Connect a workspace" onClose={onClose}><p className="dialog-copy">Checking account options…</p></Dialog>;
-  const title = isDesktop ? (registering ? "Create your Alba Agent account" : "Sign in to Alba Agent") : (registering ? (effectivePublicSignup ? "Create your workspace" : "Create the first workspace") : "Connect a workspace");
-  const description = isDesktop ? (registering ? "Sign up to start using Alba Agent with your models and workspace." : "Sign in to connect to your models and access your workspace.") : (registering ? (effectivePublicSignup ? "Create an account to start your workspace. Paid model usage requires billing credit or your own provider key." : "One-time owner setup. Enter the local registration token from your .env file.") : "Sign in to connect the studio to your workspace API.");
   return (
-    <Dialog title={title} onClose={onClose} onSubmit={() => { if (!busy && email && password) void (registering ? register() : signIn()); }}>
-      <p className="dialog-copy">{description}</p>
-      {isDesktop && (
-        <div style={{ marginBottom: "14px" }}>
-          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-            <button
-              type="button"
-              className="button button-quiet"
-              disabled={busy}
-              onClick={() => void startOAuth("google")}
-              style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "10px", width: "100%" }}
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24">
-                <path fill="#EA4335" d="M12 5c1.6 0 3 .6 4.1 1.6l3.1-3.1C17.3 1.7 14.8 1 12 1 7.5 1 3.7 3.6 1.9 7.3l3.7 2.9C6.5 7.4 9 5 12 5z"/>
-                <path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.7-.2-2.3H12v4.6h6.5c-.3 1.5-1.1 2.8-2.4 3.7l3.7 2.9c2.2-2 3.7-5 3.7-8.9z"/>
-                <path fill="#FBBC05" d="M5.6 14.8c-.2-.7-.4-1.5-.4-2.8s.2-2.1.4-2.8L1.9 6.3C.7 8.7 0 10.3 0 12s.7 3.3 1.9 5.7l3.7-2.9z"/>
-                <path fill="#34A853" d="M12 23c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3 0-5.5-2-6.4-4.8L1.9 16.4C3.7 20.4 7.5 23 12 23z"/>
-              </svg>
-              <span>{oauthWaiting === "google" ? "Waiting for Google…" : "Continue with Google"}</span>
-            </button>
-            <button
-              type="button"
-              className="button button-quiet"
-              disabled={busy}
-              onClick={() => void startOAuth("github")}
-              style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "10px", width: "100%" }}
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/>
-              </svg>
-              <span>{oauthWaiting === "github" ? "Waiting for GitHub…" : "Continue with GitHub"}</span>
-            </button>
-          </div>
-          {oauthWaiting && (
-            <p style={{ fontSize: "11px", color: "#19633f", margin: "8px 0 0", textAlign: "center" }}>
-              Complete sign-in in your browser. We&apos;ll automatically bring you into Alba Agent.
-            </p>
-          )}
-          <div style={{ display: "flex", alignItems: "center", gap: "10px", margin: "14px 0 6px" }}>
-            <div style={{ flex: 1, height: "1px", background: "#e4eae4" }} />
-            <span style={{ fontSize: "10px", color: "#7d8981", textTransform: "uppercase", letterSpacing: "0.5px" }}>or continue with email</span>
-            <div style={{ flex: 1, height: "1px", background: "#e4eae4" }} />
-          </div>
-        </div>
-      )}
-      {registering && (
-        <>
-          {isDesktop ? (
-            <label className="field">
-              <span>Your name</span>
-              <input
-                value={registration.display_name}
-                onChange={(event) => setRegistration({ ...registration, display_name: event.target.value })}
-                placeholder="Full name"
-                autoComplete="name"
-              />
-            </label>
-          ) : (
-            <>
-              <label className="field"><span>Organization</span><input value={registration.tenant_name} onChange={(event) => setRegistration({ ...registration, tenant_name: event.target.value })} /></label>
-              <label className="field"><span>Workspace</span><input value={registration.workspace_name} onChange={(event) => setRegistration({ ...registration, workspace_name: event.target.value })} /></label>
-              <label className="field"><span>Your name</span><input value={registration.display_name} onChange={(event) => setRegistration({ ...registration, display_name: event.target.value })} /></label>
-              {!effectivePublicSignup && <label className="field"><span>Setup token</span><input type="password" value={registration.setup_token} onChange={(event) => setRegistration({ ...registration, setup_token: event.target.value })} autoComplete="off" /></label>}
-            </>
-          )}
-        </>
-      )}
-      {!registering && !effectivePublicSignup && (
-        <>
-          <label className="field"><span>Tenant ID</span><input value={scope.tenant_id} onChange={(event) => onScope({ ...scope, tenant_id: event.target.value })} placeholder="Workspace tenant UUID" /></label>
-          <label className="field"><span>Workspace ID</span><input value={scope.workspace_id} onChange={(event) => onScope({ ...scope, workspace_id: event.target.value })} placeholder="Workspace UUID" /></label>
-        </>
-      )}
-      <label className="field"><span>Email</span><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" placeholder="name@example.com" /></label>
-      <label className="field"><span>Password</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={registering ? "new-password" : "current-password"} placeholder="••••••••••••" /></label>
-      {registering && <p className="dialog-copy">Use at least 12 characters for your password.</p>}
+    <Dialog title={t("account.open")} onClose={onClose}>
+      <p className="dialog-copy">{t("account.googleDescription")}</p>
+      <div style={{ margin: "16px 0 20px" }}>
+        <button
+          type="button"
+          className="button button-primary"
+          disabled={busy}
+          onClick={() => void startGoogleSignIn()}
+          style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "10px", width: "100%", padding: "10px 16px" }}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+            <path fill="#EA4335" d="M12 5c1.6 0 3 .6 4.1 1.6l3.1-3.1C17.3 1.7 14.8 1 12 1 7.5 1 3.7 3.6 1.9 7.3l3.7 2.9C6.5 7.4 9 5 12 5z"/>
+            <path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.7-.2-2.3H12v4.6h6.5c-.3 1.5-1.1 2.8-2.4 3.7l3.7 2.9c2.2-2 3.7-5 3.7-8.9z"/>
+            <path fill="#FBBC05" d="M5.6 14.8c-.2-.7-.4-1.5-.4-2.8s.2-2.1.4-2.8L1.9 6.3C.7 8.7 0 10.3 0 12s.7 3.3 1.9 5.7l3.7-2.9z"/>
+            <path fill="#34A853" d="M12 23c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3 0-5.5-2-6.4-4.8L1.9 16.4C3.7 20.4 7.5 23 12 23z"/>
+          </svg>
+          <span style={{ fontWeight: 600 }}>{t("account.signInWithGoogle")}</span>
+        </button>
+        {waiting && (
+          <p style={{ fontSize: "12px", color: "var(--color-fg-muted, #5f6368)", margin: "12px 0 0", textAlign: "center" }}>
+            {t("account.waitingGoogle")}
+          </p>
+        )}
+      </div>
       {error && <p className="inline-error" role="alert">{error}</p>}
       <div className="dialog-actions">
-        {(!isDesktop || Boolean(token)) && <button className="button button-quiet" onClick={onClose}>Cancel</button>}
-        <button className="button button-quiet" onClick={() => { setRegistering(!registering); setError(""); }}>{registering ? "Sign in instead" : "Create account"}</button>
-        <button className="button button-primary" disabled={busy || !email || !password || (registering ? (!effectivePublicSignup && !registration.setup_token) || password.length < 12 : !effectivePublicSignup && (!scope.tenant_id || !scope.workspace_id))} onClick={() => void (registering ? register() : signIn())}>{busy ? "Connecting…" : registering ? "Create account" : "Sign in"}</button>
+        <button className="button button-quiet" onClick={onClose}>{t("common.close")}</button>
       </div>
-      {token && <p className="dialog-copy">A workspace token is already stored in this browser.</p>}
     </Dialog>
   );
 }
@@ -314,76 +246,192 @@ function TeammatesHost({ token, scope, onConnect }: { token: string; scope: Work
 }
 
 /** One profile entry owns account, model, language and application settings. */
-function AccountRow({ token, onSettings, onProviders, onTools, onShortcuts, onLogout, onSwitch }: {
-  token: string; onSettings: () => void; onProviders: () => void; onTools: () => void; onShortcuts: () => void;
-  onLogout: (() => void) | null; onSwitch: (() => void) | null;
+function AccountRow({
+  session,
+  onRefreshSession,
+  onSettings,
+  onProviders,
+  onTools,
+  onShortcuts,
+  onLogout,
+  onSwitch,
+}: {
+  session: AuthSession | null;
+  onRefreshSession: () => Promise<void>;
+  onSettings: () => void;
+  onProviders: () => void;
+  onTools: () => void;
+  onShortcuts: () => void;
+  onLogout: (() => void) | null;
+  onSwitch: (() => void) | null;
 }) {
   const { t, locale, setLocale } = useLocale();
   const { selected } = useModels();
-  const [account, setAccount] = useState<{ email: string; display_name: string; plan?: string } | null>(() => {
-    try {
-      const plan = typeof window !== "undefined" ? window.localStorage.getItem("nexus_user_plan") ?? undefined : undefined;
-      return plan ? { email: "", display_name: "", plan } : null;
-    } catch {
-      return null;
-    }
-  });
   const [open, setOpen] = useState(false);
+  const [claiming, setClaiming] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    if (!token) { setAccount(null); return; }
-    let stopped = false;
-    void apiRequest<{ email: string; display_name: string; plan?: string }>("/api/v1/auth/me", token).then((value) => {
-      if (!stopped) {
-        setAccount(value);
-        if (value.plan) {
-          try { window.localStorage.setItem("nexus_user_plan", value.plan); } catch { /* ignore */ }
-        }
-      }
-    }).catch(() => undefined);
-    return () => { stopped = true; };
-  }, [token]);
+
   useEffect(() => {
     if (!open) return;
-    const away = (event: MouseEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false); };
-    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") { setOpen(false); trigger.current?.focus(); } };
-    document.addEventListener("mousedown", away); document.addEventListener("keydown", escape);
-    return () => { document.removeEventListener("mousedown", away); document.removeEventListener("keydown", escape); };
+    const away = (event: MouseEvent) => {
+      if (!root.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+        trigger.current?.focus();
+      }
+    };
+    document.addEventListener("mousedown", away);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("mousedown", away);
+      document.removeEventListener("keydown", escape);
+    };
   }, [open]);
-  const local = account?.email === "local@nexus.local" || (Boolean(token) && onLogout === null);
-  const label = local ? t("profile.local") : account?.display_name || account?.email || t("account.signedOut");
-  const choose = (run: () => void) => () => { setOpen(false); run(); };
-  const item = (icon: NavIcon, text: string, run: () => void) => <button type="button" className="account-menu__item" onClick={choose(run)}><NavGlyph name={icon} /><span>{text}</span></button>;
-  return <div className="account-wrap" ref={root}>
-    {open && <div className="account-menu ag-profile-menu" role="dialog" aria-label={t("profile.menu")}>
-      <header>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
-          <strong>{label}</strong>
-          {account?.plan && <span className={`plan-badge plan-badge--${account.plan.toLowerCase()}`}>{account.plan}</span>}
-        </div>
-        <small>{t("profile.activeAI")}: {selected ? modelLabel(selected) : t("profile.noModel")}</small>
-      </header>
-      {item("models", t("profile.providers"), onProviders)}
-      {item("customize", t("profile.tools"), onTools)}
-      <div className="ag-profile-language"><span>{t("profile.language")}</span><div role="group" aria-label={t("profile.language")}><button type="button" aria-pressed={locale === "vi"} onClick={() => setLocale("vi")}>Tiếng Việt</button><button type="button" aria-pressed={locale === "en"} onClick={() => setLocale("en")}>English</button></div></div>
-      <div className="account-menu__rule" />
-      {item("shortcuts", t("shell.shortcutsTitle"), onShortcuts)}
-      {item("general", t("profile.general"), onSettings)}
-      {!local && onSwitch && item("teammates", t("profile.switchAccount"), onSwitch)}
-      {!local && onLogout && item("logout", t("account.menu.logout"), onLogout)}
-    </div>}
-    <button ref={trigger} type="button" className={`account-row ${open ? "is-active" : ""}`} aria-haspopup="dialog" aria-expanded={open} title={t("profile.menu")} aria-label={t("profile.menu")} onClick={() => setOpen(!open)}>
-      <span className="account-avatar" aria-hidden="true">{local ? "L" : label.charAt(0).toUpperCase()}</span>
-      <span className="ag-profile-identity">
-        <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "6px" }}>
-          <strong>{label}</strong>
-          {account?.plan && <span className={`plan-badge plan-badge--${account.plan.toLowerCase()}`}>{account.plan}</span>}
-        </span>
-        <small><span className={`run-dot run-dot--${selected ? "completed" : "idle"}`} />{t(selected ? "profile.connected" : "profile.noModel")}</small>
-      </span>
+
+  const authenticated = Boolean(session?.authenticated && session?.user);
+  const user = session?.user ?? null;
+  const label = authenticated
+    ? user?.name || user?.email || t("account.googleAccount")
+    : t("account.signedOut");
+  const choose = (run: () => void) => () => {
+    setOpen(false);
+    run();
+  };
+  const item = (icon: NavIcon, text: string, run: () => void) => (
+    <button type="button" className="account-menu__item" onClick={choose(run)}>
+      <NavGlyph name={icon} />
+      <span>{text}</span>
     </button>
-  </div>;
+  );
+
+  const claimLegacy = async (claim: boolean) => {
+    setClaiming(true);
+    try {
+      await apiRequest("/api/v1/auth/legacy-data/claim", "", {
+        method: "POST",
+        body: JSON.stringify({ claim }),
+      });
+      await onRefreshSession();
+    } catch {
+      // ignore
+    } finally {
+      setClaiming(false);
+    }
+  };
+
+  return (
+    <div className="account-wrap" ref={root}>
+      {open && (
+        <div className="account-menu ag-profile-menu" role="dialog" aria-label={t("profile.menu")}>
+          <header>
+            <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
+              <strong>{label}</strong>
+              {authenticated && user?.email && user.email !== label && (
+                <span style={{ fontSize: "11px", color: "var(--color-fg-muted, #70757a)" }}>{user.email}</span>
+              )}
+            </div>
+            <small>{t("profile.activeAI")}: {selected ? modelLabel(selected) : t("profile.noModel")}</small>
+          </header>
+          {session?.has_unclaimed_legacy_data && authenticated && (
+            <div style={{ padding: "8px 10px", margin: "4px 8px 8px", background: "rgba(66, 133, 244, 0.08)", borderRadius: "6px", fontSize: "11px" }}>
+              <p style={{ margin: "0 0 6px" }}>{t("account.legacyPrompt")}</p>
+              <div style={{ display: "flex", gap: "6px" }}>
+                <button
+                  type="button"
+                  className="button button-primary"
+                  style={{ fontSize: "11px", padding: "3px 8px" }}
+                  disabled={claiming}
+                  onClick={() => void claimLegacy(true)}
+                >
+                  {claiming ? t("account.claimingLegacy") : t("account.claimLegacy")}
+                </button>
+                <button
+                  type="button"
+                  className="button button-quiet"
+                  style={{ fontSize: "11px", padding: "3px 8px" }}
+                  disabled={claiming}
+                  onClick={() => void claimLegacy(false)}
+                >
+                  {t("account.deferLegacy")}
+                </button>
+              </div>
+            </div>
+          )}
+          {authenticated ? (
+            <>
+              {item("models", t("profile.providers"), onProviders)}
+              {item("customize", t("profile.tools"), onTools)}
+              <div className="ag-profile-language">
+                <span>{t("profile.language")}</span>
+                <div role="group" aria-label={t("profile.language")}>
+                  <button type="button" aria-pressed={locale === "vi"} onClick={() => setLocale("vi")}>Tiếng Việt</button>
+                  <button type="button" aria-pressed={locale === "en"} onClick={() => setLocale("en")}>English</button>
+                </div>
+              </div>
+              <div className="account-menu__rule" />
+              {item("shortcuts", t("shell.shortcutsTitle"), onShortcuts)}
+              {item("general", t("profile.general"), onSettings)}
+              {onSwitch && item("teammates", t("profile.switchAccount"), onSwitch)}
+              {onLogout && item("logout", t("account.menu.logout"), onLogout)}
+            </>
+          ) : (
+            <>
+              {onSwitch && (
+                <div style={{ padding: "8px 12px" }}>
+                  <button
+                    type="button"
+                    className="button button-primary"
+                    style={{ width: "100%", justifyContent: "center" }}
+                    onClick={choose(onSwitch)}
+                  >
+                    {t("account.signInWithGoogle")}
+                  </button>
+                </div>
+              )}
+              <div className="account-menu__rule" />
+              <div className="ag-profile-language">
+                <span>{t("profile.language")}</span>
+                <div role="group" aria-label={t("profile.language")}>
+                  <button type="button" aria-pressed={locale === "vi"} onClick={() => setLocale("vi")}>Tiếng Việt</button>
+                  <button type="button" aria-pressed={locale === "en"} onClick={() => setLocale("en")}>English</button>
+                </div>
+              </div>
+              {item("shortcuts", t("shell.shortcutsTitle"), onShortcuts)}
+              {item("general", t("profile.general"), onSettings)}
+            </>
+          )}
+        </div>
+      )}
+      <button
+        ref={trigger}
+        type="button"
+        className={`account-row ${open ? "is-active" : ""}`}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        title={t("profile.menu")}
+        aria-label={t("profile.menu")}
+        onClick={() => setOpen(!open)}
+      >
+        <span className="account-avatar" aria-hidden="true" style={{ overflow: "hidden", display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+          {authenticated && user?.picture ? (
+            <span style={{ width: "100%", height: "100%", borderRadius: "50%", backgroundImage: `url(${user.picture})`, backgroundSize: "cover", backgroundPosition: "center", display: "inline-block" }} />
+          ) : (
+            authenticated ? label.charAt(0).toUpperCase() : "G"
+          )}
+        </span>
+        <span className="ag-profile-identity">
+          <strong>{label}</strong>
+          <small>
+            <span className={`run-dot run-dot--${authenticated ? "completed" : "idle"}`} />
+            {authenticated ? t("account.googleAccount") : t("account.signedOut")}
+          </small>
+        </span>
+      </button>
+    </div>
+  );
 }
 
 type LocalSession = { access_token: string; tenant_id: string; workspace_id: string; expires_in: number };
@@ -397,6 +445,7 @@ export function StudioApp({ initialPage = "studio" }: { initialPage?: NavPage })
   const [scope, setScope] = useState<WorkspaceScope>(emptyScope);
   const [localMode, setLocalMode] = useState<boolean | null>(null); // null while the server is asked
   const [accountOpen, setAccountOpen] = useState(false);
+  const [session, setSession] = useState<AuthSession | null>(null);
   const [modal, setModal] = useState<"api-key" | "widget" | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
@@ -417,6 +466,26 @@ export function StudioApp({ initialPage = "studio" }: { initialPage?: NavPage })
 
   const saveToken = useCallback((value: string) => { setToken(value); window.localStorage.setItem("nexus_access_token", value); }, []);
   const saveScope = useCallback((value: WorkspaceScope) => { setScope(value); window.localStorage.setItem("nexus_tenant_id", value.tenant_id); window.localStorage.setItem("nexus_workspace_id", value.workspace_id); }, []);
+
+  const refreshSession = useCallback(async () => {
+    try {
+      const data = await apiRequest<AuthSession>("/api/v1/auth/session", token);
+      setSession(data);
+      if (data.authenticated && data.user) {
+        saveScope({ tenant_id: data.user.tenant_id, workspace_id: data.user.workspace_id });
+        setAccountOpen(false);
+      } else {
+        setAccountOpen(true);
+      }
+    } catch {
+      setSession({ authenticated: false, user: null, has_unclaimed_legacy_data: false });
+      setAccountOpen(true);
+    }
+  }, [token, saveScope]);
+
+  useEffect(() => {
+    void refreshSession();
+  }, [refreshSession]);
 
   useEffect(() => {
     setPage(initialPage);
@@ -552,20 +621,29 @@ export function StudioApp({ initialPage = "studio" }: { initialPage?: NavPage })
   const changeBindings = useCallback((next: Bindings) => { setBindings(next); saveBindings(window.localStorage, next); }, []);
   const hint = useCallback((action: string) => formatCombo(bindings[action] ?? "", mac), [bindings, mac]);
   const currentScope = useMemo(() => scope, [scope]);
-  const connect = localMode === false ? () => setAccountOpen(true) : null;
-  const logout = localMode === false && token ? () => {
+  const connect = useCallback(async () => {
+    if (session?.authenticated) {
+      try { await apiRequest("/api/v1/auth/sign-out", "", { method: "POST" }); } catch { /* ignore */ }
+      await refreshSession();
+    }
+    setAccountOpen(true);
+  }, [session, refreshSession]);
+
+  const logout = useCallback(async () => {
+    try { await apiRequest("/api/v1/auth/sign-out", "", { method: "POST" }); } catch { /* ignore */ }
     saveToken("");
     try { window.localStorage.removeItem("nexus_user_plan"); } catch { /* ignore */ }
+    await refreshSession();
     setAccountOpen(true);
-  } : null;
+  }, [refreshSession, saveToken]);
 
   return <ModelProvider token={token}><WorkspaceProvider token={token}>
     <Frame page={page} workPage={workPage} navigate={navigate} collapsed={collapsed} mobileNavOpen={mobileNavOpen} closeNav={() => setMobileNavOpen(false)} toggleSidebar={toggleSidebar}
       dock={dock} dispatchDock={dispatchDock} showDock={showDock} inspector={inspector} toggleInspector={toggleInspector} hint={hint}
       openPalette={() => setCommandOpen(true)} commandOpen={commandOpen} closePalette={() => setCommandOpen(false)} connect={connect}
-      token={token} scope={currentScope} accountOpen={accountOpen && localMode === false} setAccountOpen={setAccountOpen} saveScope={saveScope} saveToken={saveToken}
+      token={token} scope={currentScope} accountOpen={accountOpen} setAccountOpen={setAccountOpen} saveScope={saveScope} saveToken={saveToken}
       modal={modal} setModal={setModal} helpOpen={helpOpen} setHelpOpen={setHelpOpen} bindings={bindings} changeBindings={changeBindings} mac={mac}
-      theme={theme} setTheme={setTheme} onLogout={logout} closeSettings={closeSettings} />
+      theme={theme} setTheme={setTheme} onLogout={logout} closeSettings={closeSettings} session={session} refreshSession={refreshSession} />
   </WorkspaceProvider></ModelProvider>;
 }
 
@@ -576,7 +654,7 @@ type FrameProps = {
   token: string; scope: WorkspaceScope; accountOpen: boolean; setAccountOpen: (open: boolean) => void; saveScope: (value: WorkspaceScope) => void; saveToken: (value: string) => void;
   modal: "api-key" | "widget" | null; setModal: (kind: "api-key" | "widget" | null) => void; helpOpen: boolean; setHelpOpen: (open: boolean) => void;
   bindings: Bindings; changeBindings: (next: Bindings) => void; mac: boolean; theme: "dark" | "light" | "system"; setTheme: (value: "dark" | "light" | "system") => void;
-  onLogout: (() => void) | null; closeSettings: () => void;
+  onLogout: (() => void) | null; closeSettings: () => void; session: AuthSession | null; refreshSession: () => Promise<void>;
 };
 
 /** The window: title bar on top; sidebar, the work and the right dock below; settings as a panel over everything. Lives inside the workspace providers. */
@@ -632,7 +710,18 @@ function Frame(props: FrameProps) {
     ...conversations.slice(0, 8).map((item) => ({ label: item.name, hint: t("shell.conversations"), run: () => { if (item.run.workflow_id) { if (item.run.id !== workspace.runId) workspace.openRun(item.run.workflow_id, item.run.id, item.name); } else if (item.run.conversation_id) workspace.openConversation(item.run.conversation_id); navigate("studio"); } })),
   ];
 
-  const account = <AccountRow token={token} onSettings={() => navigate("general")} onProviders={() => navigate("settings")} onTools={() => navigate("integrations")} onShortcuts={() => navigate("shortcuts")} onLogout={props.onLogout} onSwitch={props.connect} />;
+  const account = (
+    <AccountRow
+      session={props.session}
+      onRefreshSession={props.refreshSession}
+      onSettings={() => navigate("general")}
+      onProviders={() => navigate("settings")}
+      onTools={() => navigate("integrations")}
+      onShortcuts={() => navigate("shortcuts")}
+      onLogout={props.onLogout}
+      onSwitch={props.connect}
+    />
+  );
   return <ShellContext.Provider value={value}><div style={{ "--ag-sidebar-w": `${sidebarWidth}px` } as React.CSSProperties} className={`app-shell app-shell--chat ag-app nx-shell ${props.collapsed ? "is-collapsed" : ""} ${props.mobileNavOpen ? "is-nav-open" : ""}`}>
     <TitleBar page={shownPage} title={current?.name ?? firstWords ?? ""} project={project} collapsed={props.collapsed} onToggleSidebar={props.toggleSidebar} review={review} onShortcuts={() => navigate("shortcuts")} onNewConversation={start} />
     <div className="ag-body" inert={inSettings} aria-hidden={inSettings || undefined}>
@@ -657,7 +746,7 @@ function Frame(props: FrameProps) {
       {page === "settings" && <ProviderSettings token={token} onNavigate={navigate} />}
       {page === "intelligence" && <><div className="page-title-row"><div><h1>{t("intelligence.title")}</h1><p>{t("intelligence.body")}</p></div></div><div className="intelligence-stack"><EvolutionHost token={token} onOpened={() => navigate("studio")} /><LearningTransferRadar token={token} /><FinOpsDistillationPanel token={token} /></div></>}
     </SettingsModal>}
-    {props.accountOpen && <AccountDialog token={token} scope={scope} onScope={props.saveScope} onToken={props.saveToken} onClose={() => props.setAccountOpen(false)} />}
+    {props.accountOpen && <AccountDialog onSessionUpdated={props.refreshSession} onClose={() => props.setAccountOpen(false)} />}
     {props.modal && <IntegrationDialog kind={props.modal} token={token} onClose={() => props.setModal(null)} />}
     {props.commandOpen && <CommandPalette onClose={props.closePalette} onNavigate={navigate} hint={props.hint} onConnect={props.connect} extra={palette} />}
     {props.helpOpen && <ShortcutsDialog bindings={props.bindings} onChange={props.changeBindings} mac={props.mac} onClose={() => props.setHelpOpen(false)} />}

@@ -21,3 +21,16 @@ pub struct ProviderConnectionMetadata {
     pub created_at: i64,
     pub updated_at: i64,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GoogleAccountRecord {
+    pub sub: String,
+    pub email: String,
+    pub display_name: String,
+    pub picture: Option<String>,
+    pub tenant_id: String,
+    pub workspace_id: String,
+    pub active: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}

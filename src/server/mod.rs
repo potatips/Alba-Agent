@@ -14,7 +14,11 @@ use tower_http::services::{ServeDir, ServeFile};
 
 use crate::server::error::fallback_404;
 use crate::server::routes::approvals::{list_approvals_handler, resolve_approval_handler};
-use crate::server::routes::auth::{local_mode_handler, local_session_handler, me_handler};
+use crate::server::routes::auth::{
+    claim_legacy_data_handler, get_session_handler, google_callback_handler,
+    google_handoff_handler, google_start_handler, local_mode_handler, local_session_handler,
+    me_handler, sign_out_handler,
+};
 use crate::server::routes::capsules::list_capsules_handler;
 use crate::server::routes::health::health_handler;
 use crate::server::routes::runs::{
@@ -37,6 +41,15 @@ use crate::server::state::AppState;
 pub fn create_app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health_handler))
+        .route("/api/v1/auth/session", get(get_session_handler))
+        .route("/api/v1/auth/google/start", post(google_start_handler))
+        .route("/api/v1/auth/google/callback", get(google_callback_handler))
+        .route("/api/v1/auth/google/handoff", post(google_handoff_handler))
+        .route("/api/v1/auth/sign-out", post(sign_out_handler))
+        .route(
+            "/api/v1/auth/legacy-data/claim",
+            post(claim_legacy_data_handler),
+        )
         .route("/api/v1/auth/local-mode", get(local_mode_handler))
         .route("/api/v1/auth/local-session", post(local_session_handler))
         .route("/api/v1/auth/me", get(me_handler))

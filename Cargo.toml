@@ -28,6 +28,7 @@ tokio-stream = { version = "0.1.17", features = ["sync"] }
 futures-util = "0.3.31"
 async-stream = "0.3.6"
 regex = "1.13.1"
+jsonwebtoken = { version = "9.3.0", default-features = false, features = ["use_pem"] }
 
 [dev-dependencies]
 tempfile = "3.17.1"

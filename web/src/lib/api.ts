@@ -22,6 +22,7 @@ async function send(path: string, token: string, init: RequestInit): Promise<Res
   try {
     return await fetch(path, {
       ...init,
+      credentials: init.credentials ?? "same-origin",
       headers: { ...(init.body instanceof FormData ? {} : { "content-type": "application/json" }), ...(token ? { authorization: `Bearer ${token}` } : {}), ...init.headers },
       cache: "no-store",
     });

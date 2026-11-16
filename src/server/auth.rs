@@ -1,5 +1,6 @@
 use axum::extract::{FromRef, FromRequestParts};
 use axum::http::request::Parts;
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -148,12 +149,18 @@ pub fn verify_token_with_state(
     let unverified: LocalSessionClaims = serde_json::from_slice(&payload_bytes)
         .map_err(|_| ApiError::unauthorized("Invalid token payload"))?;
 
-    let secret_key = format!("profile:{}:jwt_secret", unverified.sub);
-    let secret = state
-        .credentials
-        .get_secret(&secret_key)
-        .map_err(|e| ApiError::internal(e.to_string()))?
-        .ok_or_else(|| ApiError::unauthorized("Invalid token signature"))?;
+    let acct_key = format!("account:{}:jwt_secret", unverified.sub);
+    let secret = match state.credentials.get_secret(&acct_key) {
+        Ok(Some(s)) => s,
+        _ => {
+            let prof_key = format!("profile:{}:jwt_secret", unverified.sub);
+            state
+                .credentials
+                .get_secret(&prof_key)
+                .map_err(|e| ApiError::internal(e.to_string()))?
+                .ok_or_else(|| ApiError::unauthorized("Invalid token signature"))?
+        }
+    };
 
     let to_sign = format!("{}.{}", parts[0], parts[1]);
     let expected_sig = hmac_sha256(secret.as_bytes(), to_sign.as_bytes());
@@ -168,6 +175,137 @@ pub fn verify_token_with_state(
     Ok(unverified)
 }
 
+pub fn generate_pkce_challenge(verifier: &str) -> String {
+    let hash = Sha256::digest(verifier.as_bytes());
+    base64url_encode(&hash)
+}
+
+pub fn validate_host_and_origin(parts: &Parts, is_mutating: bool) -> Result<(), ApiError> {
+    let host = parts
+        .headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .ok_or_else(|| ApiError::forbidden("Missing Host header"))?;
+
+    let is_loopback_host =
+        host.starts_with("127.0.0.1") || host.starts_with("localhost") || host.starts_with("[::1]");
+    if !is_loopback_host {
+        return Err(ApiError::forbidden("Invalid Host header"));
+    }
+
+    let origin = parts
+        .headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|h| h.to_str().ok());
+
+    if is_mutating {
+        let orig = origin
+            .ok_or_else(|| ApiError::forbidden("Missing Origin header on mutating request"))?;
+        let is_valid_origin = orig.starts_with("http://127.0.0.1")
+            || orig.starts_with("http://localhost")
+            || orig.starts_with("tauri://localhost")
+            || orig.starts_with("http://tauri.localhost")
+            || orig.starts_with("https://tauri.localhost");
+        if !is_valid_origin {
+            return Err(ApiError::forbidden("Untrusted Origin header"));
+        }
+    } else if let Some(orig) = origin {
+        let is_valid_origin = orig.starts_with("http://127.0.0.1")
+            || orig.starts_with("http://localhost")
+            || orig.starts_with("tauri://localhost")
+            || orig.starts_with("http://tauri.localhost")
+            || orig.starts_with("https://tauri.localhost");
+        if !is_valid_origin {
+            return Err(ApiError::forbidden("Untrusted Origin header"));
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoogleIdTokenClaims {
+    pub sub: String,
+    pub email: Option<String>,
+    pub name: Option<String>,
+    pub picture: Option<String>,
+    pub iss: String,
+    pub aud: String,
+    pub exp: i64,
+    pub nonce: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct JwksKey {
+    pub kty: String,
+    pub alg: Option<String>,
+    pub kid: String,
+    pub n: String,
+    pub e: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct JwksResponse {
+    pub keys: Vec<JwksKey>,
+}
+
+pub async fn verify_google_id_token(
+    id_token: &str,
+    jwks_url: &str,
+    expected_aud: Option<&str>,
+    expected_nonce: Option<&str>,
+) -> Result<GoogleIdTokenClaims, ApiError> {
+    let header =
+        decode_header(id_token).map_err(|_| ApiError::unauthorized("Invalid token header"))?;
+    if header.alg != Algorithm::RS256 {
+        return Err(ApiError::unauthorized(
+            "Invalid token algorithm, must be RS256",
+        ));
+    }
+    let kid = header
+        .kid
+        .ok_or_else(|| ApiError::unauthorized("Missing kid in token header"))?;
+
+    let client = reqwest::Client::new();
+    let jwks: JwksResponse = client
+        .get(jwks_url)
+        .send()
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to fetch JWKS: {e}")))?
+        .json()
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to parse JWKS: {e}")))?;
+
+    let key = jwks
+        .keys
+        .into_iter()
+        .find(|k| k.kid == kid)
+        .ok_or_else(|| ApiError::unauthorized("Unknown kid in JWKS"))?;
+
+    let decoding_key = DecodingKey::from_rsa_components(&key.n, &key.e)
+        .map_err(|e| ApiError::unauthorized(format!("Invalid RSA key components: {e}")))?;
+
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.validate_exp = true;
+    if let Some(aud) = expected_aud {
+        validation.set_audience(&[aud]);
+    } else {
+        validation.validate_aud = false;
+    }
+    validation.set_issuer(&["https://accounts.google.com", "accounts.google.com"]);
+
+    let token_data = decode::<GoogleIdTokenClaims>(id_token, &decoding_key, &validation)
+        .map_err(|e| ApiError::unauthorized(format!("Token verification failed: {e}")))?;
+
+    if let Some(nonce) = expected_nonce {
+        if token_data.claims.nonce.as_deref() != Some(nonce) {
+            return Err(ApiError::unauthorized("Nonce mismatch"));
+        }
+    }
+
+    Ok(token_data.claims)
+}
+
 #[derive(Debug, Clone)]
 pub struct AuthenticatedUser(pub LocalSessionClaims);
 
@@ -180,6 +318,36 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = crate::server::state::AppState::from_ref(state);
+
+        if let Some(cookie_hdr) = parts
+            .headers
+            .get(axum::http::header::COOKIE)
+            .and_then(|h| h.to_str().ok())
+        {
+            for pair in cookie_hdr.split(';') {
+                let mut parts_kv = pair.splitn(2, '=');
+                if let (Some(k), Some(v)) = (parts_kv.next(), parts_kv.next()) {
+                    if k.trim() == "session_id" {
+                        let sid = v.trim();
+                        let sessions = app_state.active_sessions.lock().await;
+                        if let Some(s) = sessions.get(sid) {
+                            if s.expires_at > chrono::Utc::now().timestamp() {
+                                return Ok(AuthenticatedUser(LocalSessionClaims {
+                                    sub: s.sub.clone(),
+                                    tenant_id: s.tenant_id.clone(),
+                                    workspace_id: s.workspace_id.clone(),
+                                    email: s.email.clone(),
+                                    display_name: s.display_name.clone(),
+                                    plan: "GOOGLE".to_string(),
+                                    exp: s.expires_at,
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let auth_header = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)

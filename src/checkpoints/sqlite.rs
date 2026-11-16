@@ -685,6 +685,28 @@ impl SqliteCheckpointStore {
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
         }
 
+        if current_version < 13 {
+            conn.execute_batch(
+                "
+                ALTER TABLE profiles ADD COLUMN sub TEXT;
+                ALTER TABLE profiles ADD COLUMN picture TEXT;
+                ALTER TABLE profiles ADD COLUMN tenant_id TEXT;
+                ALTER TABLE profiles ADD COLUMN workspace_id TEXT;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_sub ON profiles(sub);
+
+                CREATE TABLE IF NOT EXISTS account_legacy_claim (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    claimed_by_sub TEXT NOT NULL,
+                    claimed_at INTEGER NOT NULL
+                );
+
+                INSERT INTO schema_migrations (version, applied_at)
+                VALUES (13, datetime('now'));
+                ",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        }
+
         Ok(())
     }
 
@@ -2346,6 +2368,271 @@ impl SqliteCheckpointStore {
             updated_at: now,
         };
         self.create_profile(&default_profile)
+    }
+
+    pub fn upsert_google_account(
+        &self,
+        account: &crate::profiles::GoogleAccountRecord,
+    ) -> Result<(), CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        conn.execute(
+            "INSERT INTO profiles (id, name, email, is_local, active, created_at, updated_at, sub, picture, tenant_id, workspace_id)
+             VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?1, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                email = excluded.email,
+                active = excluded.active,
+                updated_at = excluded.updated_at,
+                picture = excluded.picture,
+                tenant_id = excluded.tenant_id,
+                workspace_id = excluded.workspace_id",
+            params![
+                account.sub,
+                account.display_name,
+                account.email,
+                if account.active { 1 } else { 0 },
+                account.created_at,
+                account.updated_at,
+                account.picture,
+                account.tenant_id,
+                account.workspace_id,
+            ],
+        )
+        .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn get_account_by_sub(
+        &self,
+        sub: &str,
+    ) -> Result<Option<crate::profiles::GoogleAccountRecord>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT sub, email, name, picture, tenant_id, workspace_id, active, created_at, updated_at
+                 FROM profiles WHERE sub = ?1 LIMIT 1",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut rows = stmt
+            .query(params![sub])
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        if let Some(row) = rows
+            .next()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?
+        {
+            let sub_val: String = row
+                .get(0)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let email: String = row
+                .get(1)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let name: String = row
+                .get(2)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let picture: Option<String> = row
+                .get(3)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let tenant_id: String = row
+                .get(4)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let workspace_id: String = row
+                .get(5)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let active_int: i64 = row
+                .get(6)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let created_at: i64 = row
+                .get(7)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let updated_at: i64 = row
+                .get(8)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            Ok(Some(crate::profiles::GoogleAccountRecord {
+                sub: sub_val,
+                email,
+                display_name: name,
+                picture,
+                tenant_id,
+                workspace_id,
+                active: active_int == 1,
+                created_at,
+                updated_at,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_active_google_account(
+        &self,
+    ) -> Result<Option<crate::profiles::GoogleAccountRecord>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT sub, email, name, picture, tenant_id, workspace_id, active, created_at, updated_at
+                 FROM profiles WHERE active = 1 AND sub IS NOT NULL ORDER BY updated_at DESC LIMIT 1",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        if let Some(row) = rows
+            .next()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?
+        {
+            let sub_val: String = row
+                .get(0)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let email: String = row
+                .get(1)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let name: String = row
+                .get(2)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let picture: Option<String> = row
+                .get(3)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let tenant_id: String = row
+                .get(4)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let workspace_id: String = row
+                .get(5)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let active_int: i64 = row
+                .get(6)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let created_at: i64 = row
+                .get(7)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let updated_at: i64 = row
+                .get(8)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            Ok(Some(crate::profiles::GoogleAccountRecord {
+                sub: sub_val,
+                email,
+                display_name: name,
+                picture,
+                tenant_id,
+                workspace_id,
+                active: active_int == 1,
+                created_at,
+                updated_at,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn set_active_google_account(&self, sub: &str) -> Result<(), CheckpointError> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        tx.execute("UPDATE profiles SET active = 0", [])
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let now = Utc::now().timestamp();
+        let changed = tx
+            .execute(
+                "UPDATE profiles SET active = 1, updated_at = ?2 WHERE sub = ?1",
+                params![sub, now],
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        if changed == 0 {
+            return Err(CheckpointError::NotFound(format!(
+                "Account {sub} not found"
+            )));
+        }
+        tx.commit()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn deactivate_all_google_accounts(&self) -> Result<(), CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        conn.execute("UPDATE profiles SET active = 0", [])
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn is_legacy_data_claimed(&self) -> Result<Option<String>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut stmt = conn
+            .prepare("SELECT claimed_by_sub FROM account_legacy_claim WHERE id = 1 LIMIT 1")
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        if let Some(row) = rows
+            .next()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?
+        {
+            let claimed_by: String = row
+                .get(0)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            Ok(Some(claimed_by))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn claim_legacy_data(&self, sub: &str) -> Result<bool, CheckpointError> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut check_stmt = tx
+            .prepare("SELECT claimed_by_sub FROM account_legacy_claim WHERE id = 1")
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut rows = check_stmt
+            .query([])
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        if rows
+            .next()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?
+            .is_some()
+        {
+            return Ok(false);
+        }
+        drop(rows);
+        drop(check_stmt);
+
+        let now = Utc::now().timestamp();
+        tx.execute(
+            "INSERT INTO account_legacy_claim (id, claimed_by_sub, claimed_at) VALUES (1, ?1, ?2)",
+            params![sub, now],
+        )
+        .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        tx.execute(
+            "UPDATE profiles SET tenant_id = '00000000-0000-0000-0000-000000000001', updated_at = ?2 WHERE sub = ?1",
+            params![sub, now],
+        )
+        .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+        tx.commit()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        Ok(true)
     }
 }
 

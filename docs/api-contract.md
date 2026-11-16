@@ -119,9 +119,235 @@ The frontend is the unmodified `NexusAgent/apps/web` (Next.js 15, Tailwind v3).
   {
     "email": "local@nexus.local",
     "display_name": "Workspace Owner",
-    "plan": "ENTERPRISE"
+    "plan": "LOCAL"
   }
   ```
+
+---
+
+## 3.1 Phase G6A Identity & Account API Contract (Antigravity Google OAuth Model)
+
+### Architecture & Security Invariants
+1. **Mandatory Google Authentication**:
+   - Access to the application requires Google Sign-In via OAuth 2.0 Authorization Code Flow with PKCE (RFC 7636) and OpenID Connect (OIDC).
+   - Loopback redirect URI on `127.0.0.1:<port>/api/v1/auth/google/callback`.
+   - Authorization requests enforce cryptographically random `state` (CSRF defense), `nonce` (replay defense), and `handoff_id` with a 10-minute TTL.
+2. **Account Data Isolation Keyed by `sub`**:
+   - There are no user-created "profiles". Each Google account represents a distinct, isolated workspace environment.
+   - The primary identity key is the immutable Google OIDC `sub` claim. Email is **never** used as a primary key or isolation identifier.
+   - Account switching is implemented as Sign Out followed by Sign In with another Google account.
+3. **Session Handoff & Zero Tokens in Response / Frontend**:
+   - `POST /api/v1/auth/google/start` issues a single-use cryptographically random `handoff_id` bound to the PKCE `state`. Only the trusted app window receives and retains this `handoff_id`.
+   - `GET /api/v1/auth/google/callback` processes the code exchange, validates the ID token, binds the session to the `handoff_id`, and serves a clean static HTML page: "Đăng nhập thành công, bạn có thể đóng tab này". No tokens, secrets, or session IDs are included in callback response bodies, headers, or redirect URLs.
+   - The app window calls `POST /api/v1/auth/google/handoff` with the `handoff_id` exactly once. The server validates, consumes the `handoff_id` immediately (preventing replay), and sets an `HttpOnly`, `SameSite=Strict` session cookie (or native bearer session in desktop shell).
+   - Google OAuth tokens (access, refresh, ID token) and the session signing key are stored exclusively in the OS Keychain via `CredentialStore`. Database tables store only metadata (`sub`, `email`, `display_name`, `picture`, `tenant_id`, `workspace_id`).
+   - Tokens are strictly redacted from application logs, error payloads, audit events, SSE streams, and memory capsules.
+4. **Tenant & Workspace Scoping**:
+   - Each Google account maps `sub -> (tenant_id, workspace_id)`.
+   - Data queries (runs, step checkpoints, memory capsules, artifacts, approvals) strictly filter by the caller's active `tenant_id` and `workspace_id` at the SQL query layer. Account A can never observe or mutate Account B's records.
+5. **Legacy Data Claim Rule (One-Time Explicit Confirmation)**:
+   - Existing workflows, runs, and checkpoints created under legacy fixed IDs (`00000000-0000-0000-0000-000000000001` and `00000000-0000-0000-0000-000000000002`) are protected.
+   - When an account authenticates, `GET /api/v1/auth/session` reports `has_unclaimed_legacy_data: true` until an account explicitly confirms claiming it via `POST /api/v1/auth/legacy-data/claim` with `{"claim": true}`.
+   - Calling `claim: false` indicates "chưa nhận lúc này" (defer decision). The legacy data remains safely in the legacy tenant, and `has_unclaimed_legacy_data` remains `true`.
+   - Exactly one account across the entire application may claim the legacy data (`claim: true`). Once claimed, `has_unclaimed_legacy_data` becomes `false` permanently; any subsequent attempt by any account returns `409 Conflict`.
+   - Behavior for second account: If Account 1 has not claimed the legacy data (`claim: false` or skipped), Account 2 can claim it upon explicit confirmation. If Account 1 has already claimed it, Account 2 is assigned its own unique UUIDv4 tenant and cannot claim legacy data (`409 Conflict`).
+6. **Offline Session Resilience**:
+   - When offline, a previously authenticated user remains logged in using the stored local session until the session expires or is explicitly revoked.
+   - Network calls are strictly confined to OAuth authentication, token refresh, token revocation, and provider LLM operations.
+7. **CSRF & DNS Rebinding Protection (Origin & Host Rules)**:
+   - `Host` header must match loopback (`127.0.0.1:<port>` or `localhost:<port>`). External host values are rejected with `403 Forbidden`.
+   - `GET /api/v1/auth/google/callback`: Accepts missing `Origin` header when `Host` is valid and `state` is valid (browser redirection from Google identity provider does not emit Origin).
+   - Mutating `POST` endpoints (`POST /auth/google/start`, `POST /auth/google/handoff`, `POST /auth/sign-out`, `POST /auth/legacy-data/claim`): Strictly require valid `Origin` (`tauri://localhost`, `http://127.0.0.1:<port>`, `http://localhost:<port>`). External web origins are rejected with `403 Forbidden`.
+8. **Dev/Test Gating for Legacy Local Endpoints**:
+   - Endpoints `GET /api/v1/auth/local-mode` and `POST /api/v1/auth/local-session` exist strictly for automated test suites and development environments via an explicit build/runtime flag (`ALBA_DEV_MODE=1` or `cfg(test)`).
+   - In production release builds, these endpoints are completely disabled and fail closed with `404 Not Found`.
+
+---
+
+### Endpoint 1: `GET /api/v1/auth/session`
+- **Purpose**: Returns the current authentication status and user identity metadata.
+- **Headers**: Optional `Cookie: session_id=...` or `Authorization: Bearer <session_token>`.
+- **Request Body**: None.
+- **Response (Unauthenticated)**: `200 OK`
+  ```json
+  {
+    "authenticated": false
+  }
+  ```
+- **Response (Authenticated)**: `200 OK`
+  ```json
+  {
+    "authenticated": true,
+    "user": {
+      "sub": "109823471092834710293",
+      "email": "developer@nexus.local",
+      "display_name": "Alba Developer",
+      "picture": "https://lh3.googleusercontent.com/a/default-user"
+    },
+    "tenant_id": "00000000-0000-0000-0000-000000000001",
+    "workspace_id": "00000000-0000-0000-0000-000000000002",
+    "has_unclaimed_legacy_data": false
+  }
+  ```
+- **Error Codes**:
+  - `500 Internal Server Error`: Storage error checking session status.
+
+---
+
+### Endpoint 2: `POST /api/v1/auth/google/start`
+- **Purpose**: Initiates the Google OAuth 2.0 PKCE flow. Generates cryptographically secure `state`, `nonce`, PKCE `code_verifier`, `code_challenge` (S256), and single-use `handoff_id`. Stores parameters transiently in memory with a 10-minute expiration.
+- **Headers**: `Host`, `Origin` (enforcing loopback/tauri).
+- **Request Body**: None or `{}`.
+- **Response**: `200 OK`
+  ```json
+  {
+    "auth_url": "https://accounts.google.com/o/oauth2/v2/auth?client_id=CLIENT_ID&redirect_uri=http%3A%2F%2F127.0.0.1%3APORT%2Fapi%2Fv1%2Fauth%2Fgoogle%2Fcallback&response_type=code&scope=openid%20email%20profile&state=RANDOM_STATE&nonce=RANDOM_NONCE&code_challenge=CHALLENGE&code_challenge_method=S256",
+    "state": "RANDOM_STATE",
+    "handoff_id": "HANDOFF_UUID"
+  }
+  ```
+- **Error Codes**:
+  - `403 Forbidden`: Untrusted `Host` or `Origin` header.
+  - `500 Internal Server Error`: Failure generating cryptographic randomness or binding loopback listener.
+
+---
+
+### Endpoint 3: `GET /api/v1/auth/google/callback`
+- **Purpose**: Handles the OAuth 2.0 loopback callback from Google.
+- **Headers**: `Host` required. `Origin` optional (browser redirect).
+- **Query Parameters**:
+  - `code`: Authorization code from Google.
+  - `state`: CSRF protection state parameter matching the stored `state`.
+- **Validation Sequence**:
+  1. Verifies `state` exists in transient store and has not expired (fail closed: `401 Unauthorized`).
+  2. Consumes `state` immediately to prevent code replay attacks.
+  3. Exchanges `code` and `code_verifier` with Google's token endpoint (`https://oauth2.googleapis.com/token` or mock identity server).
+  4. Parses ID token and verifies using `jsonwebtoken` with Google's JWKS:
+     - Algorithm is RS256; rejects `none` and HS256 algorithm confusion forged with public keys.
+     - Key ID `kid` matches an active key in Google's JWKS; refreshes JWKS cache on unknown `kid`.
+     - Issuer `iss` is `https://accounts.google.com` or `accounts.google.com`.
+     - Audience `aud` matches the registered Google OAuth client ID.
+     - Expiration `exp` is in the future.
+     - `nonce` claim matches the original nonce generated in `google/start`.
+  5. Extracts `sub`, `email`, `name`, `picture`.
+  6. Upserts account record in SQLite `accounts` table.
+  7. Securely stores Google tokens and session signing key in OS Keychain via `CredentialStore`.
+  8. Marks session as ready under `handoff_id`.
+- **Response**: `200 OK` HTML document:
+  ```html
+  <!DOCTYPE html>
+  <html>
+    <head><title>Alba - Đăng nhập thành công</title></head>
+    <body style="font-family:sans-serif;text-align:center;padding:40px;">
+      <h2>Đăng nhập thành công</h2>
+      <p>Bạn có thể đóng tab trình duyệt này và quay lại ứng dụng Alba.</p>
+    </body>
+  </html>
+  ```
+  *(Zero tokens, secrets, or session IDs in body, headers, or URL).*
+- **Error Codes**:
+  - `400 Bad Request`: Missing `code` or `state` query parameters.
+  - `401 Unauthorized`: Invalid state, expired state, code replay, or invalid ID token signature/claims.
+  - `403 Forbidden`: Untrusted `Host` header.
+  - `500 Internal Server Error`: Token exchange failure or Keychain write error.
+
+---
+
+### Endpoint 4: `POST /api/v1/auth/google/handoff`
+- **Purpose**: Exchanges the single-use `handoff_id` from the desktop application window for an authenticated session.
+- **Headers**: `Content-Type: application/json`, `Host`, `Origin` (enforcing loopback/tauri).
+- **Request Body**:
+  ```json
+  {
+    "handoff_id": "HANDOFF_UUID"
+  }
+  ```
+- **Validation Sequence**:
+  1. Validates `handoff_id` exists, is associated with a verified callback session, and has not expired.
+  2. Consumes `handoff_id` immediately (single-use; subsequent replay attempts return `401 Unauthorized`).
+  3. Sets `Set-Cookie: session_id=...; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000` (or issues native session token).
+- **Response**: `200 OK`
+  ```json
+  {
+    "status": "authenticated",
+    "user": {
+      "sub": "109823471092834710293",
+      "email": "developer@nexus.local",
+      "display_name": "Alba Developer",
+      "picture": "https://lh3.googleusercontent.com/a/default-user"
+    },
+    "tenant_id": "00000000-0000-0000-0000-000000000001",
+    "workspace_id": "00000000-0000-0000-0000-000000000002",
+    "has_unclaimed_legacy_data": false
+  }
+  ```
+- **Error Codes**:
+  - `400 Bad Request`: Missing `handoff_id`.
+  - `401 Unauthorized`: Invalid, expired, unauthenticated, or replayed `handoff_id`.
+  - `403 Forbidden`: Untrusted `Host` or `Origin`.
+
+---
+
+### Endpoint 5: `POST /api/v1/auth/sign-out`
+- **Purpose**: Terminates the active Google session and revokes tokens.
+- **Headers**: `Host`, `Origin` (enforcing loopback/tauri), plus session cookie or `Authorization: Bearer <token>`.
+- **Authentication**: Required.
+- **Request Body** (optional):
+  ```json
+  {
+    "cancel_runs": true
+  }
+  ```
+  - `cancel_runs`: boolean (default: `true`). If `true`, cancels all in-flight runs for this account's tenant.
+- **Revocation Sequence**:
+  1. Rotates/deletes session signing key in Keychain (`account:{sub}:jwt_secret`).
+  2. If online, invokes Google token revocation endpoint (`https://oauth2.googleapis.com/revoke?token=...` or mock revocation).
+  3. Records revocation status in audit trail (auditing any network revocation error; never reports false revocation success).
+  4. Deletes stored OAuth tokens from Keychain (`account:{sub}:google_tokens`).
+  5. Marks account inactive in SQLite metadata.
+  6. Any subsequent request bearing the old session token fails closed with `401 Unauthorized`.
+- **Response**: `200 OK`
+  ```json
+  {
+    "status": "signed_out"
+  }
+  ```
+- **Error Codes**:
+  - `401 Unauthorized`: Missing or invalid session.
+  - `403 Forbidden`: Untrusted `Host` or `Origin` header.
+  - `500 Internal Server Error`: Keychain deletion failure.
+
+---
+
+### Endpoint 6: `POST /api/v1/auth/legacy-data/claim`
+- **Purpose**: Enables an authenticated Google account to claim or defer claiming existing legacy data (`00000000-...-0001/0002`).
+- **Headers**: `Content-Type: application/json`, `Host`, `Origin` (enforcing loopback/tauri), session auth.
+- **Authentication**: Required.
+- **Request Body**:
+  ```json
+  {
+    "claim": true
+  }
+  ```
+- **Behavior**:
+  - If `claim: true`: Sets the authenticated account's `tenant_id` to `00000000-0000-0000-0000-000000000001` and records claim in `legacy_data_claim` table. Exactly one account across the entire app can claim it; subsequent attempts by any account return `409 Conflict`.
+  - If `claim: false`: Indicates "chưa nhận lúc này" (defer decision). Legacy data remains intact and unclaimed (`has_unclaimed_legacy_data` remains `true`).
+- **Response**: `200 OK`
+  ```json
+  {
+    "claimed": true,
+    "tenant_id": "00000000-0000-0000-0000-000000000001"
+  }
+  ```
+- **Error Codes**:
+  - `400 Bad Request`: Missing `claim` boolean field.
+  - `401 Unauthorized`: Unauthenticated.
+  - `403 Forbidden`: CSRF check failed (`Origin` / `Host`).
+  - `409 Conflict`: Legacy data has already been claimed by an account.
+
+---
+
+---
 
 ### 4. `GET /api/v1/workflows`
 - **Purpose**: Lists all registered workflows for the tenant.

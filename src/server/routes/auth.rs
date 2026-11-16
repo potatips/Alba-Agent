@@ -565,37 +565,11 @@ pub async fn sign_out_handler(
         sessions.retain(|_, s| s.sub != sub);
     }
 
-    let (tenant_id_str, workspace_id_str) = match (current_tenant, current_workspace) {
-        (Some(t), Some(w)) => (t, w),
-        _ => {
-            if let Ok(Some(acc)) = state.store.get_account_by_sub(&sub) {
-                (acc.tenant_id, acc.workspace_id)
-            } else {
-                (
-                    crate::server::auth::DEFAULT_LOCAL_TENANT_ID.to_string(),
-                    crate::server::auth::DEFAULT_LOCAL_WORKSPACE_ID.to_string(),
-                )
-            }
-        }
-    };
-    let tenant_uuid = uuid::Uuid::parse_str(&tenant_id_str).unwrap_or_else(|_| {
-        uuid::Uuid::parse_str(crate::server::auth::DEFAULT_LOCAL_TENANT_ID).unwrap()
-    });
-    let workspace_uuid = uuid::Uuid::parse_str(&workspace_id_str).unwrap_or_else(|_| {
-        uuid::Uuid::parse_str(crate::server::auth::DEFAULT_LOCAL_WORKSPACE_ID).unwrap()
-    });
-    let audit_scope =
-        crate::domain::ExecutionScope::new(tenant_uuid, workspace_uuid, uuid::Uuid::new_v4())
-            .unwrap_or_else(|_| crate::domain::ExecutionScope {
-                tenant_id: tenant_uuid,
-                workspace_id: workspace_uuid,
-                run_id: uuid::Uuid::new_v4(),
-            });
-
     let req: SignOutRequest = if bytes.is_empty() {
         SignOutRequest::default()
     } else {
-        serde_json::from_slice(&bytes).unwrap_or_default()
+        serde_json::from_slice(&bytes)
+            .map_err(|e| ApiError::bad_request(format!("Invalid request body: {e}")))?
     };
 
     if req.cancel_runs.unwrap_or(true) {
@@ -608,6 +582,73 @@ pub async fn sign_out_handler(
     }
 
     let mut failed_steps: Vec<String> = Vec::new();
+
+    let (tenant_id_str, workspace_id_str) = match (current_tenant, current_workspace) {
+        (Some(t), Some(w)) if !t.is_empty() && !w.is_empty() => (Some(t), Some(w)),
+        _ => match state.store.get_account_by_sub(&sub) {
+            Ok(Some(acc)) => (Some(acc.tenant_id), Some(acc.workspace_id)),
+            Ok(None) => {
+                failed_steps.push("account_scope_not_found".to_string());
+                (None, None)
+            }
+            Err(e) => {
+                failed_steps.push(format!("account_scope_lookup_error: {e}"));
+                (None, None)
+            }
+        },
+    };
+
+    let tenant_uuid = tenant_id_str
+        .as_deref()
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        .unwrap_or_else(|| {
+            if tenant_id_str.is_some() {
+                failed_steps.push("invalid_account_tenant_uuid".to_string());
+            }
+            uuid::Uuid::parse_str(crate::server::auth::SYSTEM_AUDIT_TENANT_ID).unwrap()
+        });
+
+    let workspace_uuid = workspace_id_str
+        .as_deref()
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        .unwrap_or_else(|| {
+            if workspace_id_str.is_some() {
+                failed_steps.push("invalid_account_workspace_uuid".to_string());
+            }
+            uuid::Uuid::parse_str(crate::server::auth::SYSTEM_AUDIT_WORKSPACE_ID).unwrap()
+        });
+
+    let audit_scope =
+        crate::domain::ExecutionScope::new(tenant_uuid, workspace_uuid, uuid::Uuid::new_v4())
+            .unwrap_or_else(|_| crate::domain::ExecutionScope {
+                tenant_id: tenant_uuid,
+                workspace_id: workspace_uuid,
+                run_id: uuid::Uuid::new_v4(),
+            });
+
+    if tenant_id_str.is_none()
+        || tenant_uuid
+            == uuid::Uuid::parse_str(crate::server::auth::SYSTEM_AUDIT_TENANT_ID).unwrap()
+    {
+        use crate::checkpoints::store::CheckpointStore;
+        let entry = crate::checkpoints::types::AuditLogEntry {
+            id: uuid::Uuid::new_v4(),
+            scope: audit_scope,
+            actor_id: Some(sub.clone()),
+            action: "auth_sign_out_error".to_string(),
+            target_id: None,
+            details: serde_json::json!({
+                "error": "Failed to resolve valid account scope for sign-out audit",
+                "sub": sub.clone(),
+                "tenant_id": tenant_id_str,
+                "workspace_id": workspace_id_str,
+            }),
+            created_at: Utc::now(),
+        };
+        if let Err(e) = state.store.record_audit_log(&entry).await {
+            failed_steps.push(format!("record_audit_log: {e}"));
+        }
+    }
 
     let tokens_key = format!("account:{sub}:google_tokens");
     match state.credentials.get_secret(&tokens_key) {

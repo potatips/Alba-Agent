@@ -323,8 +323,9 @@ The frontend is the unmodified `NexusAgent/apps/web` (Next.js 15, Tailwind v3).
     ]
   }
   ```
-  Note: Local session invalidation and cookie clearing always succeed; `failed_steps` enumerates downstream errors (e.g. `google_revocation_http_500`, `google_revocation_timeout`, `keychain_delete_jwt_secret`).
+  Note: Local session invalidation and cookie clearing always succeed; `failed_steps` enumerates downstream errors (e.g. `google_revocation_http_500`, `google_revocation_timeout`, `keychain_delete_jwt_secret`, `account_scope_not_found`, `invalid_account_tenant_uuid`). When account tenant or workspace scope cannot be resolved or parsed, audit records fall back to dedicated system audit scope (`00000000-0000-0000-0000-0000000000fe`) and error is noted in `failed_steps`.
 - **Error Codes**:
+  - `400 Bad Request`: Malformed or invalid JSON body.
   - `401 Unauthorized`: Missing or invalid session.
   - `403 Forbidden`: Untrusted `Host` or `Origin` header.
 

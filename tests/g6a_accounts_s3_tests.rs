@@ -1456,3 +1456,152 @@ async fn test_sign_out_audit_log_error() {
         .iter()
         .any(|s| s.as_str().unwrap().contains("record_audit_log")));
 }
+
+#[tokio::test]
+async fn test_sign_out_account_scope_not_found_falls_back_to_system_scope() {
+    let mock_state = new_mock_state("test-client-id");
+    let (mock_url, _) = start_mock_google_server(mock_state.clone()).await;
+    let (base_url, state) = setup_test_server(&mock_url, "test-client-id").await;
+    let host_str = base_url.strip_prefix("http://").unwrap();
+    let client = reqwest::Client::new();
+
+    let session_cookie = login_and_get_cookie(&client, &base_url, &mock_state).await;
+
+    {
+        let mut sessions = state.active_sessions.lock().await;
+        for s in sessions.values_mut() {
+            s.tenant_id = String::new();
+            s.workspace_id = String::new();
+        }
+    }
+    let store_conn = state.store.connection();
+    store_conn
+        .lock()
+        .unwrap()
+        .execute("DELETE FROM profiles;", [])
+        .unwrap();
+
+    let signout_resp = client
+        .post(format!("{base_url}/api/v1/auth/sign-out"))
+        .header(HOST, host_str)
+        .header(ORIGIN, &base_url)
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(signout_resp.status(), 207);
+    let body: Value = signout_resp.json().await.unwrap();
+    assert_eq!(body["status"], "signed_out_partial");
+    let failed_steps = body["failed_steps"].as_array().unwrap();
+    assert!(failed_steps
+        .iter()
+        .any(|s| s.as_str().unwrap().contains("account_scope_not_found")));
+
+    let conn = store_conn.lock().unwrap();
+    let mut stmt = conn
+        .prepare("SELECT tenant_id, workspace_id, action FROM audit_logs WHERE action = 'auth_sign_out_error'")
+        .unwrap();
+    let rows: Vec<(String, String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(!rows.is_empty());
+    assert_eq!(
+        rows[0].0,
+        nexus_albaai::server::auth::SYSTEM_AUDIT_TENANT_ID
+    );
+    assert_eq!(
+        rows[0].1,
+        nexus_albaai::server::auth::SYSTEM_AUDIT_WORKSPACE_ID
+    );
+    assert_ne!(
+        rows[0].0,
+        nexus_albaai::server::auth::DEFAULT_LOCAL_TENANT_ID
+    );
+}
+
+#[tokio::test]
+async fn test_sign_out_corrupted_scope_uuid_falls_back_to_system_scope() {
+    let mock_state = new_mock_state("test-client-id");
+    let (mock_url, _) = start_mock_google_server(mock_state.clone()).await;
+    let (base_url, state) = setup_test_server(&mock_url, "test-client-id").await;
+    let host_str = base_url.strip_prefix("http://").unwrap();
+    let client = reqwest::Client::new();
+
+    let session_cookie = login_and_get_cookie(&client, &base_url, &mock_state).await;
+
+    {
+        let mut sessions = state.active_sessions.lock().await;
+        for s in sessions.values_mut() {
+            s.tenant_id = "corrupted-tenant-uuid".to_string();
+            s.workspace_id = "corrupted-workspace-uuid".to_string();
+        }
+    }
+
+    let signout_resp = client
+        .post(format!("{base_url}/api/v1/auth/sign-out"))
+        .header(HOST, host_str)
+        .header(ORIGIN, &base_url)
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(signout_resp.status(), 207);
+    let body: Value = signout_resp.json().await.unwrap();
+    assert_eq!(body["status"], "signed_out_partial");
+    let failed_steps = body["failed_steps"].as_array().unwrap();
+    assert!(failed_steps
+        .iter()
+        .any(|s| s.as_str().unwrap().contains("invalid_account_tenant_uuid")));
+
+    let store_conn = state.store.connection();
+    let conn = store_conn.lock().unwrap();
+    let mut stmt = conn
+        .prepare("SELECT tenant_id, workspace_id, action FROM audit_logs WHERE action = 'auth_sign_out_error'")
+        .unwrap();
+    let rows: Vec<(String, String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(!rows.is_empty());
+    assert_eq!(
+        rows[0].0,
+        nexus_albaai::server::auth::SYSTEM_AUDIT_TENANT_ID
+    );
+    assert_eq!(
+        rows[0].1,
+        nexus_albaai::server::auth::SYSTEM_AUDIT_WORKSPACE_ID
+    );
+    assert_ne!(
+        rows[0].0,
+        nexus_albaai::server::auth::DEFAULT_LOCAL_TENANT_ID
+    );
+}
+
+#[tokio::test]
+async fn test_sign_out_malformed_json_body_returns_400() {
+    let mock_state = new_mock_state("test-client-id");
+    let (mock_url, _) = start_mock_google_server(mock_state.clone()).await;
+    let (base_url, _state) = setup_test_server(&mock_url, "test-client-id").await;
+    let host_str = base_url.strip_prefix("http://").unwrap();
+    let client = reqwest::Client::new();
+
+    let session_cookie = login_and_get_cookie(&client, &base_url, &mock_state).await;
+
+    let signout_resp = client
+        .post(format!("{base_url}/api/v1/auth/sign-out"))
+        .header(HOST, host_str)
+        .header(ORIGIN, &base_url)
+        .header(COOKIE, &session_cookie)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(b"{invalid-json-body-structure".to_vec())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(signout_resp.status(), 400);
+}

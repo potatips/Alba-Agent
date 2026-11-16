@@ -146,7 +146,7 @@ pub async fn update_workflow_handler(
 }
 
 pub async fn create_workflow_run_handler(
-    _auth: AuthenticatedUser,
+    auth: AuthenticatedUser,
     State(state): State<AppState>,
     Path(id): Path<String>,
     AppJson(body): AppJson<CreateRunRequest>,
@@ -161,9 +161,11 @@ pub async fn create_workflow_run_handler(
         serde_json::from_str(&spec_json).map_err(|e| ApiError::internal(e.to_string()))?;
 
     let run_id = Uuid::new_v4();
-    let tenant_id =
-        Uuid::parse_str(DEFAULT_LOCAL_TENANT_ID).map_err(|e| ApiError::internal(e.to_string()))?;
-    let workspace_id = Uuid::parse_str(DEFAULT_LOCAL_WORKSPACE_ID)
+    let tenant_id = Uuid::parse_str(&auth.0.tenant_id)
+        .or_else(|_| Uuid::parse_str(DEFAULT_LOCAL_TENANT_ID))
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let workspace_id = Uuid::parse_str(&auth.0.workspace_id)
+        .or_else(|_| Uuid::parse_str(DEFAULT_LOCAL_WORKSPACE_ID))
         .map_err(|e| ApiError::internal(e.to_string()))?;
     let scope = ExecutionScope::new(tenant_id, workspace_id, run_id)
         .map_err(|e| ApiError::internal(e.to_string()))?;

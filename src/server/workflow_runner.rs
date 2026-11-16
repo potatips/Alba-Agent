@@ -3,13 +3,15 @@ use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::checkpoints::SqliteCheckpointStore;
+use crate::checkpoints::types::AuditLogEntry;
+use crate::checkpoints::{CheckpointStore, SqliteCheckpointStore};
+use crate::credentials::CredentialStore;
 use crate::domain::ExecutionScope;
 use crate::events::sink::EventSink;
 use crate::events::types::{RuntimeEvent, RuntimeEventType};
 use crate::governance::DefaultApprovalPolicy;
 use crate::models::types::{ModelConfig, ModelError, ModelRequest, ModelResponse};
-use crate::models::{ModelClient, OpenAiCompatibleClient};
+use crate::models::{AnthropicClient, GeminiClient, ModelClient, OpenAiCompatibleClient};
 use crate::schema::WorkflowSpec;
 use crate::server::state::AppState;
 use crate::tools::register_workspace_tools_with_audit;
@@ -33,8 +35,12 @@ impl BroadcastEventSink {
 
 impl EventSink for BroadcastEventSink {
     fn emit(&self, event: RuntimeEvent) -> Result<(), crate::events::EventError> {
-        let _ = self.store.insert_run_event(&event);
-        let _ = self.tx.send(event);
+        if let Err(e) = self.store.insert_run_event(&event) {
+            eprintln!("Failed to insert run event: {}", e);
+        }
+        if self.tx.send(event).is_err() {
+            eprintln!("No active broadcast subscribers for event");
+        }
         Ok(())
     }
 }
@@ -42,6 +48,10 @@ impl EventSink for BroadcastEventSink {
 #[derive(Clone)]
 pub struct ServerModelClient {
     openai_client: Option<Arc<OpenAiCompatibleClient>>,
+    store: Option<Arc<SqliteCheckpointStore>>,
+    credentials: Option<Arc<dyn CredentialStore>>,
+    sub: Option<String>,
+    scope: Option<ExecutionScope>,
 }
 
 impl ServerModelClient {
@@ -61,10 +71,18 @@ impl ServerModelClient {
                 .map(Arc::new);
             Self {
                 openai_client: client,
+                store: None,
+                credentials: None,
+                sub: None,
+                scope: None,
             }
         } else {
             Self {
                 openai_client: None,
+                store: None,
+                credentials: None,
+                sub: None,
+                scope: None,
             }
         }
     }
@@ -72,6 +90,25 @@ impl ServerModelClient {
     pub fn with_client(client: OpenAiCompatibleClient) -> Self {
         Self {
             openai_client: Some(Arc::new(client)),
+            store: None,
+            credentials: None,
+            sub: None,
+            scope: None,
+        }
+    }
+
+    pub fn for_account(
+        store: Arc<SqliteCheckpointStore>,
+        credentials: Arc<dyn CredentialStore>,
+        sub: String,
+        scope: Option<ExecutionScope>,
+    ) -> Self {
+        Self {
+            openai_client: None,
+            store: Some(store),
+            credentials: Some(credentials),
+            sub: Some(sub),
+            scope,
         }
     }
 }
@@ -84,7 +121,254 @@ impl Default for ServerModelClient {
 
 impl ModelClient for ServerModelClient {
     async fn complete(&self, request: &ModelRequest) -> Result<ModelResponse, ModelError> {
-        if let Some(ref client) = self.openai_client {
+        if let Some(ref sub) = self.sub {
+            let store = self.store.as_ref().ok_or_else(|| {
+                ModelError::ConfigurationError(
+                    "checkpoint store missing for account model client".to_string(),
+                )
+            })?;
+            let credentials = self.credentials.as_ref().ok_or_else(|| {
+                ModelError::ConfigurationError(
+                    "credential store missing for account model client".to_string(),
+                )
+            })?;
+
+            let account_opt = store
+                .get_google_account_by_sub(sub)
+                .map_err(|e| ModelError::ConfigurationError(e.to_string()))?;
+            let account = match account_opt {
+                Some(acc) if acc.active => acc,
+                _ => {
+                    return Err(ModelError::AuthenticationError(format!(
+                        "account {} is inactive or not found",
+                        sub
+                    )));
+                }
+            };
+
+            let connections = store
+                .get_provider_connections_by_profile(&account.sub)
+                .map_err(|e| ModelError::ConfigurationError(e.to_string()))?;
+            if connections.is_empty() {
+                let err = ModelError::ConfigurationError(format!(
+                    "no provider connections configured for account {}",
+                    sub
+                ));
+                if let Some(scope) = self.scope {
+                    let entry = AuditLogEntry {
+                        id: Uuid::new_v4(),
+                        scope,
+                        actor_id: Some(sub.clone()),
+                        action: "model.completion_failed".to_string(),
+                        target_id: None,
+                        details: serde_json::json!({
+                            "error": "no provider connections configured",
+                        }),
+                        created_at: Utc::now(),
+                    };
+                    if let Err(e) = store.record_audit_log(&entry).await {
+                        eprintln!("Failed to record audit log: {}", e);
+                    }
+                }
+                return Err(err);
+            }
+
+            let default_models: Option<Value> = store
+                .get_account_default_models(sub)
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str(&s).ok());
+            let chat_default = default_models
+                .as_ref()
+                .and_then(|dm| dm.get("chat_model").or_else(|| dm.get("chat")))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let (selected_conn, target_model) = if let Some(ref req_model) = request.model_override
+            {
+                let conn = connections
+                    .iter()
+                    .find(|c| c.available_models.iter().any(|m| m == req_model))
+                    .or_else(|| {
+                        if req_model.starts_with("claude") {
+                            connections.iter().find(|c| c.preset_id == "anthropic")
+                        } else if req_model.starts_with("gemini") {
+                            connections.iter().find(|c| c.preset_id == "google_gemini")
+                        } else if req_model.starts_with("deepseek") {
+                            connections.iter().find(|c| c.preset_id == "deepseek")
+                        } else if req_model.starts_with("gpt-") || req_model.starts_with("o1") {
+                            connections.iter().find(|c| c.preset_id == "openai")
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| connections.iter().find(|c| c.is_default))
+                    .unwrap_or(&connections[0]);
+                (conn, req_model.clone())
+            } else {
+                let conn = if let Some(ref default_m) = chat_default {
+                    connections
+                        .iter()
+                        .find(|c| c.available_models.iter().any(|m| m == default_m))
+                        .or_else(|| connections.iter().find(|c| c.is_default))
+                        .unwrap_or(&connections[0])
+                } else {
+                    connections
+                        .iter()
+                        .find(|c| c.is_default)
+                        .unwrap_or(&connections[0])
+                };
+                let m = chat_default
+                    .or_else(|| {
+                        conn.default_models
+                            .get("chat")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .or_else(|| conn.available_models.first().cloned())
+                    .unwrap_or_else(|| match conn.preset_id.as_str() {
+                        "anthropic" => "claude-3-5-haiku".to_string(),
+                        "google_gemini" => "gemini-1.5-pro".to_string(),
+                        "deepseek" => "deepseek-chat".to_string(),
+                        _ => "gpt-4o-mini".to_string(),
+                    });
+                (conn, m)
+            };
+
+            let secret_key = format!("account:{}:provider:{}", sub, selected_conn.id);
+            let secret_opt = credentials.get_secret(&secret_key).map_err(|e| {
+                ModelError::AuthenticationError(format!("failed to read secret: {}", e))
+            })?;
+
+            let api_key = match secret_opt {
+                Some(key) if !key.trim().is_empty() => key,
+                _ => {
+                    let err = ModelError::AuthenticationError(format!(
+                        "credential missing or revoked for provider {}",
+                        selected_conn.id
+                    ));
+                    if let Some(scope) = self.scope {
+                        let entry = AuditLogEntry {
+                            id: Uuid::new_v4(),
+                            scope,
+                            actor_id: Some(sub.clone()),
+                            action: "model.completion_failed".to_string(),
+                            target_id: Uuid::parse_str(&selected_conn.id).ok(),
+                            details: serde_json::json!({
+                                "provider_id": selected_conn.id,
+                                "preset_id": selected_conn.preset_id,
+                                "error": "credential missing or revoked",
+                            }),
+                            created_at: Utc::now(),
+                        };
+                        if let Err(e) = store.record_audit_log(&entry).await {
+                            eprintln!("Failed to record audit log: {}", e);
+                        }
+                    }
+                    return Err(err);
+                }
+            };
+
+            let mut req = request.clone();
+            req.model_override = Some(target_model.clone());
+
+            let result = match selected_conn.preset_id.as_str() {
+                "anthropic" => {
+                    let base_url = selected_conn
+                        .base_url
+                        .clone()
+                        .unwrap_or_else(|| "https://api.anthropic.com/v1".to_string());
+                    let client = AnthropicClient::new(ModelConfig::new(
+                        base_url,
+                        api_key,
+                        target_model.clone(),
+                    ))?;
+                    client.complete(&req).await
+                }
+                "google_gemini" => {
+                    let base_url = selected_conn
+                        .base_url
+                        .clone()
+                        .unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_string());
+                    let client = GeminiClient::new(ModelConfig::new(
+                        base_url,
+                        api_key,
+                        target_model.clone(),
+                    ))?;
+                    client.complete(&req).await
+                }
+                "deepseek" => {
+                    let base_url = selected_conn
+                        .base_url
+                        .clone()
+                        .unwrap_or_else(|| "https://api.deepseek.com/v1".to_string());
+                    let client = OpenAiCompatibleClient::new(ModelConfig::new(
+                        base_url,
+                        api_key,
+                        target_model.clone(),
+                    ))?;
+                    client.complete(&req).await
+                }
+                _ => {
+                    let base_url = selected_conn
+                        .base_url
+                        .clone()
+                        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+                    let client = OpenAiCompatibleClient::new(ModelConfig::new(
+                        base_url,
+                        api_key,
+                        target_model.clone(),
+                    ))?;
+                    client.complete(&req).await
+                }
+            };
+
+            if let Some(scope) = self.scope {
+                match &result {
+                    Ok(resp) => {
+                        let entry = AuditLogEntry {
+                            id: Uuid::new_v4(),
+                            scope,
+                            actor_id: Some(sub.clone()),
+                            action: "model.completion".to_string(),
+                            target_id: Uuid::parse_str(&selected_conn.id).ok(),
+                            details: serde_json::json!({
+                                "provider_id": selected_conn.id,
+                                "preset_id": selected_conn.preset_id,
+                                "model": target_model,
+                                "prompt_tokens": resp.usage.as_ref().map(|u| u.prompt_tokens),
+                                "completion_tokens": resp.usage.as_ref().map(|u| u.completion_tokens),
+                            }),
+                            created_at: Utc::now(),
+                        };
+                        if let Err(e) = store.record_audit_log(&entry).await {
+                            eprintln!("Failed to record audit log: {}", e);
+                        }
+                    }
+                    Err(err) => {
+                        let entry = AuditLogEntry {
+                            id: Uuid::new_v4(),
+                            scope,
+                            actor_id: Some(sub.clone()),
+                            action: "model.completion_failed".to_string(),
+                            target_id: Uuid::parse_str(&selected_conn.id).ok(),
+                            details: serde_json::json!({
+                                "provider_id": selected_conn.id,
+                                "preset_id": selected_conn.preset_id,
+                                "model": target_model,
+                                "error": err.to_string(),
+                            }),
+                            created_at: Utc::now(),
+                        };
+                        if let Err(e) = store.record_audit_log(&entry).await {
+                            eprintln!("Failed to record audit log: {}", e);
+                        }
+                    }
+                }
+            }
+
+            result
+        } else if let Some(ref client) = self.openai_client {
             client.complete(request).await
         } else {
             Err(ModelError::ConfigurationError(
@@ -101,9 +385,12 @@ pub async fn run_workflow_background(
     input_data: Option<Value>,
 ) {
     let run_id_str = scope.run_id.to_string();
-    let _ = state
+    if let Err(e) = state
         .store
-        .update_run_status(&run_id_str, "RUNNING", None, None);
+        .update_run_status(&run_id_str, "RUNNING", None, None)
+    {
+        eprintln!("Failed to update run status: {}", e);
+    }
 
     let event_sink = Arc::new(BroadcastEventSink::new(
         state.store.clone(),
@@ -120,9 +407,26 @@ pub async fn run_workflow_background(
             "run_id": run_id_str,
         }),
     };
-    let _ = event_sink.emit(start_event);
+    if let Err(e) = event_sink.emit(start_event) {
+        eprintln!("Failed to emit start event: {}", e);
+    }
 
-    let model = Arc::new(state.model.clone().unwrap_or_default());
+    let model = Arc::new({
+        let tenant_id_str = scope.tenant_id.to_string();
+        if let Ok(Some(account)) = state.store.get_account_by_tenant_id(&tenant_id_str) {
+            ServerModelClient::for_account(
+                state.store.clone(),
+                state.credentials.clone(),
+                account.sub,
+                Some(scope),
+            )
+        } else if let Some(ref m) = state.model {
+            m.clone()
+        } else {
+            ServerModelClient::default()
+        }
+    });
+
     let policy = Arc::new(DefaultApprovalPolicy::new().with_workspace_root(&state.workspace_root));
     let mut registry = ToolRegistry::new();
     register_workspace_tools_with_audit(
@@ -152,9 +456,12 @@ pub async fn resume_workflow_background(
     spec: WorkflowSpec,
 ) {
     let run_id_str = scope.run_id.to_string();
-    let _ = state
+    if let Err(e) = state
         .store
-        .update_run_status(&run_id_str, "RUNNING", None, None);
+        .update_run_status(&run_id_str, "RUNNING", None, None)
+    {
+        eprintln!("Failed to update run status: {}", e);
+    }
 
     let event_sink = Arc::new(BroadcastEventSink::new(
         state.store.clone(),
@@ -171,9 +478,26 @@ pub async fn resume_workflow_background(
             "run_id": run_id_str,
         }),
     };
-    let _ = event_sink.emit(resume_event);
+    if let Err(e) = event_sink.emit(resume_event) {
+        eprintln!("Failed to emit resume event: {}", e);
+    }
 
-    let model = Arc::new(state.model.clone().unwrap_or_default());
+    let model = Arc::new({
+        let tenant_id_str = scope.tenant_id.to_string();
+        if let Ok(Some(account)) = state.store.get_account_by_tenant_id(&tenant_id_str) {
+            ServerModelClient::for_account(
+                state.store.clone(),
+                state.credentials.clone(),
+                account.sub,
+                Some(scope),
+            )
+        } else if let Some(ref m) = state.model {
+            m.clone()
+        } else {
+            ServerModelClient::default()
+        }
+    });
+
     let policy = Arc::new(DefaultApprovalPolicy::new().with_workspace_root(&state.workspace_root));
     let mut registry = ToolRegistry::new();
     register_workspace_tools_with_audit(
@@ -209,20 +533,30 @@ fn handle_outcome(
     match outcome_result {
         Ok(WorkflowOutcome::Completed(output)) => {
             let out_str = output.to_string();
-            let _ =
+            if let Err(e) =
                 state
                     .store
-                    .update_run_status(&run_id_str, "SUCCEEDED", Some(&out_str), Some(&now));
+                    .update_run_status(&run_id_str, "SUCCEEDED", Some(&out_str), Some(&now))
+            {
+                eprintln!("Failed to update run status: {}", e);
+            }
         }
         Ok(WorkflowOutcome::AwaitingApproval { .. }) => {
-            let _ = state
-                .store
-                .update_run_status(&run_id_str, "AWAITING_APPROVAL", None, None);
+            if let Err(e) =
+                state
+                    .store
+                    .update_run_status(&run_id_str, "AWAITING_APPROVAL", None, None)
+            {
+                eprintln!("Failed to update run status: {}", e);
+            }
         }
         Ok(WorkflowOutcome::Paused { node_id }) => {
-            let _ = state
+            if let Err(e) = state
                 .store
-                .update_run_status(&run_id_str, "PAUSED", None, None);
+                .update_run_status(&run_id_str, "PAUSED", None, None)
+            {
+                eprintln!("Failed to update run status: {}", e);
+            }
             let pause_event = RuntimeEvent {
                 id: Uuid::new_v4(),
                 scope,
@@ -234,12 +568,17 @@ fn handle_outcome(
                     "run_id": run_id_str,
                 }),
             };
-            let _ = event_sink.emit(pause_event);
+            if let Err(e) = event_sink.emit(pause_event) {
+                eprintln!("Failed to emit pause event: {}", e);
+            }
         }
         Ok(WorkflowOutcome::Failed(err)) => {
-            let _ = state
+            if let Err(e) = state
                 .store
-                .update_run_status(&run_id_str, "FAILED", None, Some(&now));
+                .update_run_status(&run_id_str, "FAILED", None, Some(&now))
+            {
+                eprintln!("Failed to update run status: {}", e);
+            }
             let fail_event = RuntimeEvent {
                 id: Uuid::new_v4(),
                 scope,
@@ -251,12 +590,18 @@ fn handle_outcome(
                     "message": err,
                 }),
             };
-            let _ = event_sink.emit(fail_event);
+            if let Err(e) = event_sink.emit(fail_event) {
+                eprintln!("Failed to emit fail event: {}", e);
+            }
         }
         Ok(WorkflowOutcome::Cancelled) => {
-            let _ = state
-                .store
-                .update_run_status(&run_id_str, "CANCELLED", None, Some(&now));
+            if let Err(e) =
+                state
+                    .store
+                    .update_run_status(&run_id_str, "CANCELLED", None, Some(&now))
+            {
+                eprintln!("Failed to update run status: {}", e);
+            }
             let cancel_event = RuntimeEvent {
                 id: Uuid::new_v4(),
                 scope,
@@ -268,12 +613,17 @@ fn handle_outcome(
                     "run_id": run_id_str,
                 }),
             };
-            let _ = event_sink.emit(cancel_event);
+            if let Err(e) = event_sink.emit(cancel_event) {
+                eprintln!("Failed to emit cancel event: {}", e);
+            }
         }
         Err(err) => {
-            let _ = state
+            if let Err(e) = state
                 .store
-                .update_run_status(&run_id_str, "FAILED", None, Some(&now));
+                .update_run_status(&run_id_str, "FAILED", None, Some(&now))
+            {
+                eprintln!("Failed to update run status: {}", e);
+            }
             let fail_event = RuntimeEvent {
                 id: Uuid::new_v4(),
                 scope,
@@ -285,7 +635,9 @@ fn handle_outcome(
                     "message": err.to_string(),
                 }),
             };
-            let _ = event_sink.emit(fail_event);
+            if let Err(e) = event_sink.emit(fail_event) {
+                eprintln!("Failed to emit fail event: {}", e);
+            }
         }
     }
 }

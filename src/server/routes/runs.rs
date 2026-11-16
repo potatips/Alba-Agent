@@ -166,7 +166,7 @@ pub async fn cancel_run_handler(
 }
 
 pub async fn resume_run_handler(
-    _auth: AuthenticatedUser,
+    auth: AuthenticatedUser,
     State(state): State<AppState>,
     Path(id): Path<String>,
     _bytes: axum::body::Bytes,
@@ -195,8 +195,12 @@ pub async fn resume_run_handler(
     let spec: WorkflowSpec =
         serde_json::from_str(&spec_json).map_err(|e| ApiError::internal(e.to_string()))?;
 
-    let tenant_id = Uuid::from_str(DEFAULT_LOCAL_TENANT_ID).unwrap();
-    let workspace_id = Uuid::from_str(DEFAULT_LOCAL_WORKSPACE_ID).unwrap();
+    let tenant_id = Uuid::parse_str(&auth.0.tenant_id)
+        .or_else(|_| Uuid::from_str(DEFAULT_LOCAL_TENANT_ID))
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let workspace_id = Uuid::parse_str(&auth.0.workspace_id)
+        .or_else(|_| Uuid::from_str(DEFAULT_LOCAL_WORKSPACE_ID))
+        .map_err(|e| ApiError::internal(e.to_string()))?;
     let scope = ExecutionScope::new(tenant_id, workspace_id, run_id)
         .map_err(|e| ApiError::internal(e.to_string()))?;
 

@@ -16,6 +16,14 @@ async fn test_tauri_shell_scripted_launch_and_process_tree() {
 
     if !bin_path.exists() {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let web_out = manifest_dir.join("web/out");
+        if !web_out.exists() {
+            let _ = std::fs::create_dir_all(&web_out);
+            let _ = std::fs::write(
+                web_out.join("index.html"),
+                "<!DOCTYPE html><html><body></body></html>",
+            );
+        }
         let mut cmd = Command::new("cargo");
         cmd.arg("build")
             .arg("--package")

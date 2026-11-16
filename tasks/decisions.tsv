@@ -48,5 +48,7 @@ time	phase	decision	reason	evidence	result
 2026-11-16T18:30:00Z	G6A-S1	provider-auth-architecture-census	Researched Anthropic, OpenAI, Google Gemini, DeepSeek auth mechanisms and subscription sharing constraints; documented official URLs and API key vs OAuth models	tasks/decisions.tsv, tasks/todo.md	PASS
 2026-11-16T19:00:00Z	G6A-S2	profile-schema-credential-store-and-jwt-randomization	Migration 12 adds profiles and provider_connections tables with zero secrets in SQLite; dynamic 256-bit random secret per profile stored via CredentialStore trait; DEFAULT_JWT_SECRET removed	src/credentials/mod.rs, src/checkpoints/sqlite.rs, src/server/auth.rs	PASS
 2026-11-16T20:30:00Z	G6A-harden	credential-store-hardening-and-security-framework	Replaced argv secret passing in MacosKeychainStore with security-framework 3.7.0 (MIT/Apache-2.0, ~0 KB incremental size, cargo deny clean) avoiding ps exposure; error propagation on get/set/delete; multi-secret index enumeration; real keychain test gated with ALBA_TEST_KEYCHAIN=1	src/credentials/mod.rs, tests/g6a_accounts_s2_tests.rs, Cargo.toml	PASS
+2026-11-16T20:55:00Z	G6A-S3-proposal	propose-s3-auth-and-profile-endpoints	Proposed S3 endpoints for identity layer: POST /api/v1/auth/sign-in, POST /api/v1/auth/sign-out, GET /api/v1/profiles, POST /api/v1/profiles, POST /api/v1/profiles/:id/switch, DELETE /api/v1/profiles/:id; stopped for approval per rule	docs/api-contract.md, tasks/decisions.tsv	PROPOSED
+
 
 

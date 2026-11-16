@@ -3,7 +3,8 @@ import type { ReactNode } from "react";
 export type IconName =
   | "sidebar" | "back" | "forward" | "search" | "more" | "plus" | "filter" | "folder" | "folderPlus" | "chat" | "bolt" | "customize" | "settings"
   | "close" | "expand" | "collapse" | "mic" | "send" | "stop" | "copy" | "thumbUp" | "thumbDown" | "chevronDown" | "chevronRight" | "shield" | "globe"
-  | "refresh" | "panelRight" | "review" | "file" | "terminal" | "extensions" | "canvas" | "trash" | "external" | "check" | "attach" | "log" | "pin";
+  | "refresh" | "panelRight" | "review" | "file" | "terminal" | "extensions" | "canvas" | "trash" | "external" | "check" | "attach" | "log" | "pin"
+  | "computer" | "cloud";
 
 const PATHS: Record<IconName, ReactNode> = {
   sidebar: <><rect x="3.5" y="5" width="17" height="14" rx="2.5" /><path d="M9.5 5v14" /></>,
@@ -14,7 +15,7 @@ const PATHS: Record<IconName, ReactNode> = {
   plus: <path d="M12 5v14M5 12h14" />,
   filter: <path d="M4 7h16M7 12h10M10 17h4" />,
   folder: <path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />,
-  folderPlus: <><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" /><path d="M12 10.5v5M9.5 13h5" /></>,
+  folderPlus: <><path d="M4 7a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v3M4 7v11a2 2 0 0 0 2 2h6" /><path d="M18 15v6M15 18h6" /></>,
   chat: <><path d="M4 5.5h16v10.5H9l-4.5 3.5V5.5z" /></>,
   bolt: <path d="M13 3 5 13.5h6L10 21l8-10.5h-6z" />,
   customize: <><rect x="4" y="4" width="6.5" height="6.5" rx="1.5" /><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5" /><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.5" /><path d="M16.75 4v6.5M13.5 7.25H20" /></>,
@@ -45,6 +46,8 @@ const PATHS: Record<IconName, ReactNode> = {
   attach: <path d="m20 11-8 8a5 5 0 0 1-7-7l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4L15 7" />,
   pin: <path d="m9 3 6 0-1 6 3 3H7l3-3zM12 12v8" />,
   log: <path d="M5 6h14M5 10.5h14M5 15h9M5 19.5h6" />,
+  computer: <><rect x="3.5" y="4.5" width="17" height="11.5" rx="2" /><path d="M2.5 19.5h19M9.5 16v3.5M14.5 16v3.5" /></>,
+  cloud: <path d="M6.5 18a4.5 4.5 0 0 1-.5-8.97A7 7 0 0 1 19.5 11a4.5 4.5 0 0 1-2 8.5z" />,
 };
 
 /** One icon set for the whole shell: 24px grid, 1.7 stroke, inherits the text colour. */

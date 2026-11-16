@@ -672,4 +672,26 @@ body:has(> .ag-resize-shield) iframe { pointer-events: none; }
 .plan-badge--free { background: rgba(148, 163, 184, .16); color: #94a3b8; border: 1px solid rgba(148, 163, 184, .3); }
 .plan-badge--pro { background: rgba(59, 130, 246, .18); color: #60a5fa; border: 1px solid rgba(59, 130, 246, .4); }
 .plan-badge--enterprise { background: rgba(168, 85, 247, .18); color: #c084fc; border: 1px solid rgba(168, 85, 247, .4); }
+.nx-create-project-modal { width: min(480px, calc(100% - 32px)); background: #141414; border: 1px solid #282828; border-radius: 16px; padding: 20px 24px 20px; color: var(--ag-text); box-shadow: 0 24px 64px rgba(0, 0, 0, .7); display: flex; flex-direction: column; position: relative; outline: 0; }
+.nx-create-project-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+.nx-create-project-head h2 { font-size: 17px; font-weight: 600; color: #fff; margin: 0; }
+.nx-create-project-close { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 6px; background: transparent; border: 0; color: #888; cursor: pointer; }
+.nx-create-project-close:hover { color: #fff; background: rgba(255, 255, 255, .08); }
+.nx-create-project-tabs { display: flex; background: #1e1e1e; border-radius: 9999px; padding: 3px; margin-bottom: 20px; gap: 2px; }
+.nx-create-project-tab { flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px; height: 34px; border: 0; border-radius: 9999px; background: transparent; color: #888; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 120ms ease; }
+.nx-create-project-tab:hover { color: #ccc; }
+.nx-create-project-tab.is-active { background: #2e2e2e; color: #fff; box-shadow: 0 2px 6px rgba(0, 0, 0, .25); }
+.nx-create-project-section-label { font-size: 13px; font-weight: 500; color: #e0e0e0; margin-bottom: 10px; }
+.nx-create-project-add-btn { width: 100%; height: 44px; border-radius: 10px; background: #222222; border: 1px solid #303030; color: #fff; font-size: 14px; font-weight: 500; display: flex; align-items: center; justify-content: center; gap: 8px; cursor: pointer; transition: all 120ms ease; }
+.nx-create-project-add-btn:hover { background: #2b2b2b; border-color: #3d3d3d; }
+.nx-create-project-selected-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.nx-create-project-selected-item { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; background: #1c1c1c; border: 1px solid #2d2d2d; border-radius: 8px; font-size: 13px; color: #fff; }
+.nx-create-project-selected-info { display: flex; align-items: center; gap: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nx-create-project-foot { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+.nx-create-project-skip-btn { padding: 6px 20px; height: 32px; border-radius: 9999px; background: #262626; border: 1px solid #333; color: #e0e0e0; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 120ms ease; }
+.nx-create-project-skip-btn:hover { background: #333333; color: #fff; }
+.nx-create-project-primary-btn { padding: 6px 20px; height: 32px; border-radius: 9999px; background: #3b82f6; border: 0; color: #fff; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 120ms ease; }
+.nx-create-project-primary-btn:hover { background: #2563eb; }
+.nx-create-project-remote-input { width: 100%; height: 40px; border-radius: 8px; background: #1e1e1e; border: 1px solid #333; padding: 0 12px; color: #fff; font-size: 13px; outline: 0; }
+.nx-create-project-remote-input:focus { border-color: #3b82f6; }
 @media (max-width: 640px) { .ag-result-actions { margin-left: 0; } .ag-run-participants small { max-width: 175px; } .ag-unified-run { padding: 12px; } }

@@ -10,6 +10,7 @@ import { conversationKey, conversationTime, isUnread, moveSidebarProject, readCo
 import type { Conversation } from "@/components/workspace/use-conversations";
 import { useWorkspace } from "@/components/workspace/workspace-context";
 import { ConversationOptions, SidebarPopup, useSidebarPreferences } from "./conversation-options";
+import { CreateProjectModal } from "./create-project-modal";
 import { Icon } from "./icons";
 import { NexusLogo } from "@/components/brand/nexus-agent-logo";
 import type { NavPage } from "./shell-context";
@@ -42,6 +43,7 @@ export function Sidebar({ page, conversations, preferenceScope, reload, navigate
   const [asking, setAsking] = useState<string | null>(null);
   const [problem, setProblem] = useState("");
   const [canPickFolder, setCanPickFolder] = useState(false);
+  const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [projects, setProjects] = useState<Record<string, string>>({});
   const [menu, setMenu] = useState<ItemMenu | null>(null);
   const closeMenu = useCallback(() => setMenu(null), []);
@@ -92,7 +94,7 @@ export function Sidebar({ page, conversations, preferenceScope, reload, navigate
       <section className="ag-section" aria-label={t("shell.projects")}>
         <header className="ag-section__head"><h3>{t("shell.projects")}</h3><span className="ag-section__tools">
           <ConversationOptions state={state} update={update} disabled={!ready} unreadCount={unreadCount} markAllRead={() => update(previous => readConversations(previous, conversations))} />
-          {canPickFolder && <button type="button" className="ag-iconbtn ag-iconbtn--small" aria-label={t("repos.add")} title={t("repos.add")} onClick={() => void workspace.openFolder()}><Icon name="folderPlus" size={14} /></button>}
+          <button type="button" className="ag-iconbtn ag-iconbtn--small" aria-label={t("shell.createProject")} title={t("shell.createProject")} onClick={() => setCreateProjectOpen(true)}><Icon name="folderPlus" size={14} /></button>
         </span></header>
         {state.groupBy === "project" && shown.length === 0 && !state.archivedOnly && state.filter === "all" && !state.query && <p className="ag-empty">{t(canPickFolder ? "shell.noProjectsDesktop" : "shell.noProjects")}</p>}
         <ul className="ag-list">{shown.map((group, index) => <li key={group.name} className="ag-group">
@@ -125,5 +127,6 @@ export function Sidebar({ page, conversations, preferenceScope, reload, navigate
         {action(t("sidebar.moveDown"), () => reorder(menu.name, 1), shown.findIndex(group => group.name === menu.name) === shown.length - 1)}
       </>}
     </SidebarPopup>}
+    {createProjectOpen && <CreateProjectModal onClose={() => setCreateProjectOpen(false)} />}
   </aside>;
 }

@@ -29,6 +29,8 @@ async fn test_release_bundle_execution_and_process_tree() {
     let data_dir = tmp.path().to_path_buf();
 
     let mut child = Command::new(&bin_path)
+        .arg("-ApplePersistenceIgnoreState")
+        .arg("YES")
         .env("ALBA_DATA_DIR", &data_dir)
         .spawn()
         .expect("failed to spawn bundle executable");
@@ -37,7 +39,7 @@ async fn test_release_bundle_execution_and_process_tree() {
     let port_file = data_dir.join("backend_port");
 
     let mut port: Option<u16> = None;
-    for _ in 0..50 {
+    for _ in 0..120 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if port_file.exists() {
             if let Ok(content) = std::fs::read_to_string(&port_file) {

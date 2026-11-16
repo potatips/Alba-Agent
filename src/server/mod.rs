@@ -6,7 +6,7 @@ pub mod workflow_runner;
 
 use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
@@ -27,7 +27,10 @@ use crate::server::routes::runs::{
     rewind_run_checkpoint_handler,
 };
 use crate::server::routes::settings::{
-    get_chat_models_handler, get_execution_policy_handler, update_execution_policy_handler,
+    create_credential_handler, delete_credential_handler, get_chat_models_handler,
+    get_credentials_handler, get_default_models_handler, get_execution_policy_handler,
+    get_provider_presets_handler, test_credential_handler, update_default_models_handler,
+    update_execution_policy_handler,
 };
 use crate::server::routes::sse::stream_run;
 use crate::server::routes::tools::{list_builtin_tools_handler, list_skills_handler};
@@ -105,6 +108,26 @@ pub fn create_app(state: AppState) -> Router {
         )
         .route("/api/v1/capsules/search", get(list_capsules_handler))
         .route("/api/v1/settings/chat-models", get(get_chat_models_handler))
+        .route(
+            "/api/v1/settings/provider-presets",
+            get(get_provider_presets_handler),
+        )
+        .route(
+            "/api/v1/settings/credentials",
+            get(get_credentials_handler).post(create_credential_handler),
+        )
+        .route(
+            "/api/v1/settings/credentials/{id}",
+            delete(delete_credential_handler),
+        )
+        .route(
+            "/api/v1/settings/credentials/{id}/test",
+            post(test_credential_handler),
+        )
+        .route(
+            "/api/v1/settings/default-models",
+            get(get_default_models_handler).put(update_default_models_handler),
+        )
         .route(
             "/api/v1/settings/execution",
             get(get_execution_policy_handler).put(update_execution_policy_handler),

@@ -707,6 +707,32 @@ impl SqliteCheckpointStore {
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
         }
 
+        if current_version < 14 {
+            conn.execute_batch(
+                "
+                ALTER TABLE provider_connections ADD COLUMN preset_id TEXT;
+                ALTER TABLE provider_connections ADD COLUMN status TEXT DEFAULT 'CONNECTED';
+                ALTER TABLE provider_connections ADD COLUMN base_url TEXT;
+                ALTER TABLE provider_connections ADD COLUMN is_default INTEGER DEFAULT 0;
+                ALTER TABLE provider_connections ADD COLUMN available_models TEXT DEFAULT '[]';
+                ALTER TABLE provider_connections ADD COLUMN default_models TEXT DEFAULT '{}';
+                ALTER TABLE provider_connections ADD COLUMN settings TEXT DEFAULT '{}';
+                ALTER TABLE provider_connections ADD COLUMN masked_key TEXT;
+                ALTER TABLE provider_connections ADD COLUMN safe_error TEXT;
+
+                CREATE TABLE IF NOT EXISTS account_default_models (
+                    sub TEXT PRIMARY KEY,
+                    models_json TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
+                INSERT INTO schema_migrations (version, applied_at)
+                VALUES (14, datetime('now'));
+                ",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        }
+
         Ok(())
     }
 
@@ -2633,6 +2659,351 @@ impl SqliteCheckpointStore {
         tx.commit()
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
         Ok(true)
+    }
+
+    pub fn create_or_update_provider_connection(
+        &self,
+        conn_rec: &crate::profiles::ProviderConnection,
+    ) -> Result<(), CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let available_models_json =
+            serde_json::to_string(&conn_rec.available_models).unwrap_or_else(|_| "[]".to_string());
+        let default_models_json =
+            serde_json::to_string(&conn_rec.default_models).unwrap_or_else(|_| "{}".to_string());
+        let settings_json =
+            serde_json::to_string(&conn_rec.settings).unwrap_or_else(|_| "{}".to_string());
+
+        conn.execute(
+            "INSERT INTO provider_connections (
+                id, profile_id, provider, preset_id, auth_type, account_label,
+                status, base_url, is_default, available_models, default_models,
+                settings, masked_key, safe_error, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+             ON CONFLICT(id) DO UPDATE SET
+                provider = excluded.provider,
+                preset_id = excluded.preset_id,
+                auth_type = excluded.auth_type,
+                account_label = excluded.account_label,
+                status = excluded.status,
+                base_url = excluded.base_url,
+                is_default = excluded.is_default,
+                available_models = excluded.available_models,
+                default_models = excluded.default_models,
+                settings = excluded.settings,
+                masked_key = COALESCE(excluded.masked_key, provider_connections.masked_key),
+                safe_error = excluded.safe_error,
+                updated_at = excluded.updated_at",
+            params![
+                conn_rec.id,
+                conn_rec.profile_id,
+                conn_rec.provider,
+                conn_rec.preset_id,
+                conn_rec.auth_type,
+                conn_rec.account_label,
+                conn_rec.status,
+                conn_rec.base_url,
+                if conn_rec.is_default { 1 } else { 0 },
+                available_models_json,
+                default_models_json,
+                settings_json,
+                conn_rec.masked_key,
+                conn_rec.safe_error,
+                conn_rec.created_at,
+                conn_rec.updated_at,
+            ],
+        )
+        .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn get_provider_connections_by_profile(
+        &self,
+        profile_id: &str,
+    ) -> Result<Vec<crate::profiles::ProviderConnection>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, profile_id, provider, COALESCE(preset_id, provider), auth_type,
+                        account_label, COALESCE(status, 'CONNECTED'), base_url, COALESCE(is_default, 0),
+                        COALESCE(available_models, '[]'), COALESCE(default_models, '{}'),
+                        COALESCE(settings, '{}'), masked_key, safe_error, created_at, updated_at
+                 FROM provider_connections WHERE profile_id = ?1 ORDER BY created_at ASC",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut rows = stmt
+            .query(params![profile_id])
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut results = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?
+        {
+            let id: String = row
+                .get(0)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let profile_id: String = row
+                .get(1)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let provider: String = row
+                .get(2)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let preset_id: String = row
+                .get(3)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let auth_type: String = row
+                .get(4)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let account_label: Option<String> = row
+                .get(5)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let status: String = row
+                .get(6)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let base_url: Option<String> = row
+                .get(7)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let is_default_int: i64 = row
+                .get(8)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let avail_models_str: String = row
+                .get(9)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let def_models_str: String = row
+                .get(10)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let settings_str: String = row
+                .get(11)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let masked_key: Option<String> = row
+                .get(12)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let safe_error: Option<String> = row
+                .get(13)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let created_at: i64 = row
+                .get(14)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let updated_at: i64 = row
+                .get(15)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+            let available_models: Vec<String> =
+                serde_json::from_str(&avail_models_str).unwrap_or_default();
+            let default_models: serde_json::Value =
+                serde_json::from_str(&def_models_str).unwrap_or(serde_json::json!({}));
+            let settings: serde_json::Value =
+                serde_json::from_str(&settings_str).unwrap_or(serde_json::json!({}));
+
+            results.push(crate::profiles::ProviderConnection {
+                id,
+                profile_id,
+                provider,
+                preset_id,
+                auth_type,
+                account_label,
+                status,
+                base_url,
+                is_default: is_default_int == 1,
+                available_models,
+                default_models,
+                settings,
+                masked_key,
+                safe_error,
+                created_at,
+                updated_at,
+            });
+        }
+        Ok(results)
+    }
+
+    pub fn get_provider_connection_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::profiles::ProviderConnection>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, profile_id, provider, COALESCE(preset_id, provider), auth_type,
+                        account_label, COALESCE(status, 'CONNECTED'), base_url, COALESCE(is_default, 0),
+                        COALESCE(available_models, '[]'), COALESCE(default_models, '{}'),
+                        COALESCE(settings, '{}'), masked_key, safe_error, created_at, updated_at
+                 FROM provider_connections WHERE id = ?1 LIMIT 1",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut rows = stmt
+            .query(params![id])
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        if let Some(row) = rows
+            .next()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?
+        {
+            let id: String = row
+                .get(0)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let profile_id: String = row
+                .get(1)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let provider: String = row
+                .get(2)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let preset_id: String = row
+                .get(3)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let auth_type: String = row
+                .get(4)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let account_label: Option<String> = row
+                .get(5)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let status: String = row
+                .get(6)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let base_url: Option<String> = row
+                .get(7)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let is_default_int: i64 = row
+                .get(8)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let avail_models_str: String = row
+                .get(9)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let def_models_str: String = row
+                .get(10)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let settings_str: String = row
+                .get(11)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let masked_key: Option<String> = row
+                .get(12)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let safe_error: Option<String> = row
+                .get(13)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let created_at: i64 = row
+                .get(14)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let updated_at: i64 = row
+                .get(15)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+
+            let available_models: Vec<String> =
+                serde_json::from_str(&avail_models_str).unwrap_or_default();
+            let default_models: serde_json::Value =
+                serde_json::from_str(&def_models_str).unwrap_or(serde_json::json!({}));
+            let settings: serde_json::Value =
+                serde_json::from_str(&settings_str).unwrap_or(serde_json::json!({}));
+
+            Ok(Some(crate::profiles::ProviderConnection {
+                id,
+                profile_id,
+                provider,
+                preset_id,
+                auth_type,
+                account_label,
+                status,
+                base_url,
+                is_default: is_default_int == 1,
+                available_models,
+                default_models,
+                settings,
+                masked_key,
+                safe_error,
+                created_at,
+                updated_at,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn delete_provider_connection(
+        &self,
+        id: &str,
+        profile_id: &str,
+    ) -> Result<bool, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let affected = conn
+            .execute(
+                "DELETE FROM provider_connections WHERE id = ?1 AND profile_id = ?2",
+                params![id, profile_id],
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        Ok(affected > 0)
+    }
+
+    pub fn delete_all_provider_connections_for_profile(
+        &self,
+        profile_id: &str,
+    ) -> Result<usize, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let affected = conn
+            .execute(
+                "DELETE FROM provider_connections WHERE profile_id = ?1",
+                params![profile_id],
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        Ok(affected)
+    }
+
+    pub fn get_account_default_models(&self, sub: &str) -> Result<Option<String>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut stmt = conn
+            .prepare("SELECT models_json FROM account_default_models WHERE sub = ?1 LIMIT 1")
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut rows = stmt
+            .query(params![sub])
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        if let Some(row) = rows
+            .next()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?
+        {
+            let json_str: String = row
+                .get(0)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            Ok(Some(json_str))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn set_account_default_models(
+        &self,
+        sub: &str,
+        models_json: &str,
+    ) -> Result<(), CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let now = Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO account_default_models (sub, models_json, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(sub) DO UPDATE SET
+                models_json = excluded.models_json,
+                updated_at = excluded.updated_at",
+            params![sub, models_json, now],
+        )
+        .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        Ok(())
     }
 }
 

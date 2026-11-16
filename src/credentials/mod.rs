@@ -98,8 +98,9 @@ impl CredentialStore for MemoryCredentialStore {
             .map
             .write()
             .map_err(|e| CredentialStoreError::Other(e.to_string()))?;
-        let prefix = format!("profile:{profile_id}:");
-        guard.retain(|k, _| !k.starts_with(&prefix));
+        let prefix1 = format!("profile:{profile_id}:");
+        let prefix2 = format!("account:{profile_id}:");
+        guard.retain(|k, _| !k.starts_with(&prefix1) && !k.starts_with(&prefix2));
         Ok(())
     }
 }
@@ -122,7 +123,8 @@ impl MacosKeychainStore {
 
     fn parse_profile_id(key: &str) -> Option<&str> {
         let mut parts = key.split(':');
-        if parts.next()? == "profile" {
+        let prefix = parts.next()?;
+        if prefix == "profile" || prefix == "account" {
             let pid = parts.next()?;
             if let Some(item) = parts.next() {
                 if !item.starts_with("__") {

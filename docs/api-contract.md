@@ -60,13 +60,13 @@ The frontend is the unmodified `NexusAgent/apps/web` (Next.js 15, Tailwind v3).
 | 41 | `POST` | `/api/v1/auth/register` | `apps/web/src/components/studio-app.tsx:120` | `Registration` | `Session` | Deferred | Desktop runs in local-session mode. |
 | 42 | `POST` | `/api/v1/auth/keys` | `apps/web/src/components/studio-app.tsx:231` | `KeyRequest` | `{"key": string}` | Deferred | Service key management. |
 | 43 | `POST` | `/api/v1/auth/oauth/exchange` | `apps/web/src/components/studio-app.tsx:55` | `OAuthPayload` | `Session` | Deferred | OAuth integration. |
-| 44 | `GET` | `/api/v1/settings/credentials` | `apps/web/src/components/providers/provider-settings.tsx:94` | None | `Array<Credential>` | Deferred | Provider keys configured via environment. |
-| 45 | `POST` | `/api/v1/settings/credentials` | `apps/web/src/components/providers/provider-settings.tsx:49` | `CredentialInput` | `Credential` | Deferred | Provider keys configured via environment. |
-| 46 | `DELETE` | `/api/v1/settings/credentials/:id` | `apps/web/src/components/integrations/integrations-page.tsx:41` | None | `{"deleted": true}` | Deferred | Provider keys configured via environment. |
-| 47 | `POST` | `/api/v1/settings/credentials/:id/test` | `apps/web/src/components/providers/provider-settings.tsx:52` | None | `{"valid": boolean}` | Deferred | Provider keys configured via environment. |
-| 48 | `GET` | `/api/v1/settings/default-models` | `apps/web/src/components/providers/provider-settings.tsx:95` | None | `DefaultModels` | Deferred | Defaults configured in engine config. |
-| 49 | `PUT` | `/api/v1/settings/default-models` | `apps/web/src/components/providers/provider-settings.tsx:144` | `DefaultModels` | `DefaultModels` | Deferred | Defaults configured in engine config. |
-| 50 | `GET` | `/api/v1/settings/provider-presets` | `apps/web/src/components/providers/provider-settings.tsx:102` | None | `Array<Preset>` | Deferred | Engine built-in provider table. |
+| 44 | `GET` | `/api/v1/settings/credentials` | `apps/web/src/components/providers/provider-settings.tsx:94` | None | `Array<Credential>` | **Required (G6A)** | List active Google account's provider credentials with masked keys. |
+| 45 | `POST` | `/api/v1/settings/credentials` | `apps/web/src/components/providers/provider-settings.tsx:49` | `CredentialInput` | `Credential` | **Required (G6A)** | Store provider API key strictly in Keychain and metadata in SQLite. |
+| 46 | `DELETE` | `/api/v1/settings/credentials/:id` | `apps/web/src/components/integrations/integrations-page.tsx:41` | None | `{"deleted": true}` | **Required (G6A)** | Delete provider credential metadata and purge secret from Keychain. |
+| 47 | `POST` | `/api/v1/settings/credentials/:id/test` | `apps/web/src/components/providers/provider-settings.tsx:52` | None | `{"status": string, ...}` | **Required (G6A)** | Test provider credential connectivity with mock or live provider. |
+| 48 | `GET` | `/api/v1/settings/default-models` | `apps/web/src/components/providers/provider-settings.tsx:95` | None | `DefaultModels` | **Required (G6A)** | Get active account's default model routing table. |
+| 49 | `PUT` | `/api/v1/settings/default-models` | `apps/web/src/components/providers/provider-settings.tsx:144` | `DefaultModels` | `DefaultModels` | **Required (G6A)** | Update active account's default model routing table. |
+| 50 | `GET` | `/api/v1/settings/provider-presets` | `apps/web/src/components/providers/provider-settings.tsx:102` | None | `{"categories": ...}` | **Required (G6A)** | Built-in provider preset catalog (OpenAI, Anthropic, Gemini, DeepSeek). |
 | 51 | `POST` | `/api/v1/settings/providers/ollama/discover` | `apps/web/src/components/providers/provider-settings.tsx:152` | None | `Array<string>` | Deferred | Local Ollama discovery. |
 | 52 | `GET` | `/api/v1/settings/subscriptions/accounts` | `apps/web/src/components/providers/subscription-hub.tsx:11` | None | `Array<Subscription>` | Deferred | Cloud subscription hub. |
 | 53 | `PUT` | `/api/v1/tools/builtin/:id/enabled` | `apps/web/src/components/capabilities/capability-hub.tsx:106` | `{"enabled": boolean}` | `{"enabled": boolean}` | Deferred | Handled by execution policy in v1. |
@@ -747,6 +747,113 @@ The frontend is the unmodified `NexusAgent/apps/web` (Next.js 15, Tailwind v3).
     }
   ]
   ```
+
+### 25. `GET /api/v1/settings/provider-presets`
+- **Purpose**: Returns preset definitions and schema for supported direct LLM providers (OpenAI, Anthropic, Gemini, DeepSeek).
+- **Headers**: Optional authentication
+- **Response**: `200 OK`
+  ```json
+  {
+    "categories": {
+      "direct": [
+        {
+          "id": "openai",
+          "name": "OpenAI",
+          "category": "direct",
+          "description": "GPT-4o, GPT-4o-mini, o1",
+          "protocol": "openai",
+          "base_url": "https://api.openai.com/v1",
+          "models": [...],
+          "auth_fields": [{ "name": "api_key", "label": "API Key", "required": true, "secret": true, "placeholder": "sk-..." }],
+          "icon": "openai",
+          "local": false
+        }
+      ]
+    }
+  }
+  ```
+
+### 26. `GET /api/v1/settings/credentials`
+- **Purpose**: Lists all provider connections belonging to the authenticated Google account (`sub`). Raw secrets are NEVER returned; only `masked_key` is exposed.
+- **Headers**: `Cookie: session_id=<session_id>` or `Authorization: Bearer <token>`
+- **Response**: `200 OK`
+  ```json
+  [
+    {
+      "id": "c7a8b9c0-1234-4567-89ab-cdef01234567",
+      "preset_id": "anthropic",
+      "provider": "anthropic",
+      "masked_key": "sk-ant-...2345",
+      "status": "CONNECTED",
+      "base_url": "https://api.anthropic.com/v1",
+      "is_default": true,
+      "available_models": ["claude-3-7-sonnet", "claude-3-5-haiku"],
+      "default_models": {},
+      "settings": {},
+      "balance": null,
+      "safe_error": null
+    }
+  ]
+  ```
+- **Error Codes**:
+  - `401 Unauthorized`: When unauthenticated.
+
+### 27. `POST /api/v1/settings/credentials`
+- **Purpose**: Creates or updates a provider connection scoped to the authenticated Google account (`sub`). The API key is stored strictly in Keychain under `account:{sub}:provider:{id}` and NEVER stored in SQLite.
+- **Headers**: `Cookie: session_id=<session_id>` or `Authorization: Bearer <token>`, `Content-Type: application/json`
+- **Request Body**:
+  ```json
+  {
+    "preset_id": "anthropic",
+    "api_key": "sk-ant-api03-secret",
+    "base_url": "https://api.anthropic.com/v1",
+    "is_default": true
+  }
+  ```
+- **Response**: `200 OK` with `CredentialResponse` (with `masked_key`, zero secret).
+- **Error Codes**:
+  - `400 Bad Request`: When `preset_id` or `api_key` is missing.
+  - `401 Unauthorized`: When unauthenticated.
+
+### 28. `POST /api/v1/settings/credentials/:id/test`
+- **Purpose**: Tests provider connectivity using the secret retrieved from Keychain.
+- **Headers**: `Cookie: session_id=<session_id>` or `Authorization: Bearer <token>`
+- **Response**: `200 OK`
+  ```json
+  {
+    "status": "CONNECTED",
+    "latency_ms": 110,
+    "available_models": ["claude-3-7-sonnet", "claude-3-5-haiku"],
+    "balance": null,
+    "error": null
+  }
+  ```
+- **Error Codes**:
+  - `401 Unauthorized`: When unauthenticated.
+  - `404 Not Found`: When credential does not exist or belongs to another user.
+
+### 29. `DELETE /api/v1/settings/credentials/:id`
+- **Purpose**: Deletes a provider connection and purges its API key from Keychain.
+- **Headers**: `Cookie: session_id=<session_id>` or `Authorization: Bearer <token>`
+- **Response**: `200 OK`
+  ```json
+  {
+    "deleted": true
+  }
+  ```
+- **Error Codes**:
+  - `401 Unauthorized`: When unauthenticated.
+  - `404 Not Found`: When credential does not exist or belongs to another user.
+
+### 30. `GET /api/v1/settings/default-models`
+- **Purpose**: Returns active Google account's default model routing table.
+- **Headers**: `Cookie: session_id=<session_id>` or `Authorization: Bearer <token>`
+- **Response**: `200 OK`
+
+### 31. `PUT /api/v1/settings/default-models`
+- **Purpose**: Updates active Google account's default model routing table.
+- **Headers**: `Cookie: session_id=<session_id>` or `Authorization: Bearer <token>`, `Content-Type: application/json`
+- **Response**: `200 OK`
 
 ---
 

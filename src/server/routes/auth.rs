@@ -855,6 +855,67 @@ pub async fn sign_out_handler(
         }
     }
 
+    if let Ok(conns) = state.store.get_provider_connections_by_profile(&sub) {
+        for c in conns {
+            let p_key = format!("account:{sub}:provider:{}", c.id);
+            if let Err(e) = state.credentials.delete_secret(&p_key) {
+                let step = format!("keychain_delete_provider_secret_{}: {e}", c.id);
+                failed_steps.push(step.clone());
+                use crate::checkpoints::store::CheckpointStore;
+                let entry = crate::checkpoints::types::AuditLogEntry {
+                    id: uuid::Uuid::new_v4(),
+                    scope: audit_scope,
+                    actor_id: Some(sub.clone()),
+                    action: "auth_sign_out_error".to_string(),
+                    target_id: None,
+                    details: serde_json::json!({ "error": step }),
+                    created_at: Utc::now(),
+                };
+                if let Err(e) = state.store.record_audit_log(&entry).await {
+                    failed_steps.push(format!("record_audit_log: {e}"));
+                }
+            }
+        }
+        if let Err(e) = state
+            .store
+            .delete_all_provider_connections_for_profile(&sub)
+        {
+            let step = format!("delete_provider_connections_for_profile: {e}");
+            failed_steps.push(step.clone());
+            use crate::checkpoints::store::CheckpointStore;
+            let entry = crate::checkpoints::types::AuditLogEntry {
+                id: uuid::Uuid::new_v4(),
+                scope: audit_scope,
+                actor_id: Some(sub.clone()),
+                action: "auth_sign_out_error".to_string(),
+                target_id: None,
+                details: serde_json::json!({ "error": step }),
+                created_at: Utc::now(),
+            };
+            if let Err(e) = state.store.record_audit_log(&entry).await {
+                failed_steps.push(format!("record_audit_log: {e}"));
+            }
+        }
+    }
+
+    if let Err(e) = state.credentials.delete_profile_secrets(&sub) {
+        let step = format!("keychain_delete_profile_secrets: {e}");
+        failed_steps.push(step.clone());
+        use crate::checkpoints::store::CheckpointStore;
+        let entry = crate::checkpoints::types::AuditLogEntry {
+            id: uuid::Uuid::new_v4(),
+            scope: audit_scope,
+            actor_id: Some(sub.clone()),
+            action: "auth_sign_out_error".to_string(),
+            target_id: None,
+            details: serde_json::json!({ "error": step }),
+            created_at: Utc::now(),
+        };
+        if let Err(e) = state.store.record_audit_log(&entry).await {
+            failed_steps.push(format!("record_audit_log: {e}"));
+        }
+    }
+
     let (http_status, status_str) = if failed_steps.is_empty() {
         (axum::http::StatusCode::OK, "signed_out")
     } else {

@@ -56,6 +56,8 @@ struct MockGoogleState {
     code_exchange_override: Arc<std::sync::Mutex<Option<String>>>,
     active_nonce: Arc<std::sync::Mutex<Option<String>>>,
     client_id: String,
+    revoke_status: Arc<std::sync::atomic::AtomicU16>,
+    revoke_delay_ms: Arc<std::sync::atomic::AtomicU64>,
 }
 
 fn new_mock_state(client_id: &str) -> MockGoogleState {
@@ -65,6 +67,8 @@ fn new_mock_state(client_id: &str) -> MockGoogleState {
         code_exchange_override: Arc::new(std::sync::Mutex::new(None)),
         active_nonce: Arc::new(std::sync::Mutex::new(None)),
         client_id: client_id.to_string(),
+        revoke_status: Arc::new(std::sync::atomic::AtomicU16::new(200)),
+        revoke_delay_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     }
 }
 
@@ -209,7 +213,12 @@ async fn start_mock_google_server(state: MockGoogleState) -> (String, SocketAddr
                     let st = st.clone();
                     async move {
                         st.revocation_count.fetch_add(1, Ordering::SeqCst);
-                        axum::http::StatusCode::OK
+                        let delay = st.revoke_delay_ms.load(Ordering::SeqCst);
+                        if delay > 0 {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                        }
+                        let code = st.revoke_status.load(Ordering::SeqCst);
+                        axum::http::StatusCode::from_u16(code).unwrap_or(axum::http::StatusCode::OK)
                     }
                 }
             }),
@@ -253,6 +262,176 @@ async fn setup_test_server(mock_base_url: &str, client_id: &str) -> (String, App
     });
 
     (base_url, state)
+}
+
+#[derive(Clone)]
+struct FaultyCredentialStore {
+    inner: MemoryCredentialStore,
+    fail_get_keys: Arc<std::sync::Mutex<Vec<String>>>,
+    fail_delete_keys: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl FaultyCredentialStore {
+    fn new() -> Self {
+        Self {
+            inner: MemoryCredentialStore::new(),
+            fail_get_keys: Arc::new(std::sync::Mutex::new(Vec::new())),
+            fail_delete_keys: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    fn fail_get_for(&self, key: &str) {
+        self.fail_get_keys.lock().unwrap().push(key.to_string());
+    }
+
+    fn fail_delete_for(&self, key: &str) {
+        self.fail_delete_keys.lock().unwrap().push(key.to_string());
+    }
+}
+
+impl nexus_albaai::credentials::CredentialStore for FaultyCredentialStore {
+    fn get_secret(
+        &self,
+        key: &str,
+    ) -> Result<Option<String>, nexus_albaai::credentials::CredentialStoreError> {
+        if self
+            .fail_get_keys
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|k| key.contains(k))
+        {
+            return Err(nexus_albaai::credentials::CredentialStoreError::Platform(
+                "Injected get error".to_string(),
+            ));
+        }
+        self.inner.get_secret(key)
+    }
+
+    fn set_secret(
+        &self,
+        key: &str,
+        secret: &str,
+    ) -> Result<(), nexus_albaai::credentials::CredentialStoreError> {
+        self.inner.set_secret(key, secret)
+    }
+
+    fn get_or_set_secret(
+        &self,
+        key: &str,
+        generate: &dyn Fn() -> String,
+    ) -> Result<String, nexus_albaai::credentials::CredentialStoreError> {
+        self.inner.get_or_set_secret(key, generate)
+    }
+
+    fn delete_secret(
+        &self,
+        key: &str,
+    ) -> Result<(), nexus_albaai::credentials::CredentialStoreError> {
+        if self
+            .fail_delete_keys
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|k| key.contains(k))
+        {
+            return Err(nexus_albaai::credentials::CredentialStoreError::Platform(
+                "Injected delete error".to_string(),
+            ));
+        }
+        self.inner.delete_secret(key)
+    }
+
+    fn delete_profile_secrets(
+        &self,
+        profile_id: &str,
+    ) -> Result<(), nexus_albaai::credentials::CredentialStoreError> {
+        self.inner.delete_profile_secrets(profile_id)
+    }
+}
+
+async fn setup_test_server_with_creds(
+    mock_base_url: &str,
+    client_id: &str,
+    creds: Arc<dyn nexus_albaai::credentials::CredentialStore>,
+) -> (String, AppState) {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("alba_test.db");
+    let store = Arc::new(SqliteCheckpointStore::new(&db_path).unwrap());
+
+    let state = AppState::new(store, tmp.path().to_path_buf())
+        .with_credentials(creds)
+        .with_allow_local_auth(true)
+        .with_oauth_config(
+            Some(client_id.to_string()),
+            format!("{mock_base_url}/o/oauth2/v2/auth"),
+            format!("{mock_base_url}/oauth2/v2/token"),
+            format!("{mock_base_url}/oauth2/v3/certs"),
+            format!("{mock_base_url}/oauth2/v2/revoke"),
+        );
+
+    let app = create_app(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{}", addr);
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    (base_url, state)
+}
+
+async fn login_and_get_cookie(
+    client: &reqwest::Client,
+    base_url: &str,
+    mock_state: &MockGoogleState,
+) -> String {
+    let host_str = base_url.strip_prefix("http://").unwrap();
+    let start_resp = client
+        .post(format!("{base_url}/api/v1/auth/google/start"))
+        .header(HOST, host_str)
+        .header(ORIGIN, base_url)
+        .send()
+        .await
+        .unwrap();
+    let start_body: Value = start_resp.json().await.unwrap();
+    let auth_url = start_body.get("auth_url").unwrap().as_str().unwrap();
+    let nonce_val = auth_url
+        .split("&nonce=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap();
+    *mock_state.active_nonce.lock().unwrap() = Some(nonce_val.to_string());
+    let state_str = start_body.get("state").unwrap().as_str().unwrap();
+    let handoff_id = start_body.get("handoff_id").unwrap().as_str().unwrap();
+
+    client
+        .get(format!(
+            "{base_url}/api/v1/auth/google/callback?code=mock-code&state={state_str}"
+        ))
+        .header(HOST, host_str)
+        .send()
+        .await
+        .unwrap();
+
+    let handoff_resp = client
+        .post(format!("{base_url}/api/v1/auth/google/handoff"))
+        .header(HOST, host_str)
+        .header(ORIGIN, base_url)
+        .json(&serde_json::json!({ "handoff_id": handoff_id }))
+        .send()
+        .await
+        .unwrap();
+    let cookie_header = handoff_resp
+        .headers()
+        .get(SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    cookie_header.split(';').next().unwrap().to_string()
 }
 
 #[tokio::test]
@@ -993,4 +1172,287 @@ async fn test_release_mode_rejects_local_mode_and_local_session_with_404() {
         .await
         .unwrap();
     assert_eq!(resp_sess.status(), 404);
+}
+
+#[tokio::test]
+async fn test_sign_out_keychain_delete_error() {
+    let mock_state = new_mock_state("test-client-id");
+    let (mock_url, _) = start_mock_google_server(mock_state.clone()).await;
+    let creds = Arc::new(FaultyCredentialStore::new());
+    let (base_url, state) =
+        setup_test_server_with_creds(&mock_url, "test-client-id", creds.clone()).await;
+    let host_str = base_url.strip_prefix("http://").unwrap();
+    let client = reqwest::Client::new();
+
+    let session_cookie = login_and_get_cookie(&client, &base_url, &mock_state).await;
+
+    creds.fail_delete_for("jwt_secret");
+
+    let signout_resp = client
+        .post(format!("{base_url}/api/v1/auth/sign-out"))
+        .header(HOST, host_str)
+        .header(ORIGIN, &base_url)
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(signout_resp.status(), 207);
+    let cookie_hdrs: Vec<_> = signout_resp.headers().get_all(SET_COOKIE).iter().collect();
+    assert!(cookie_hdrs
+        .iter()
+        .any(|h| h.to_str().unwrap().contains("Max-Age=0")));
+
+    let body: Value = signout_resp.json().await.unwrap();
+    assert_eq!(body["status"], "signed_out_partial");
+    let failed_steps = body["failed_steps"].as_array().unwrap();
+    assert!(failed_steps
+        .iter()
+        .any(|s| s.as_str().unwrap().contains("keychain_delete_jwt_secret")));
+
+    let store_conn = state.store.connection();
+    let conn = store_conn.lock().unwrap();
+    let mut stmt = conn
+        .prepare("SELECT tenant_id, workspace_id, action FROM audit_logs WHERE action = 'auth_sign_out_error'")
+        .unwrap();
+    let rows: Vec<(String, String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(!rows.is_empty());
+    assert_ne!(
+        rows[0].0,
+        nexus_albaai::server::auth::DEFAULT_LOCAL_TENANT_ID
+    );
+    assert_ne!(
+        rows[0].1,
+        nexus_albaai::server::auth::DEFAULT_LOCAL_WORKSPACE_ID
+    );
+}
+
+#[tokio::test]
+async fn test_sign_out_token_read_error() {
+    let mock_state = new_mock_state("test-client-id");
+    let (mock_url, _) = start_mock_google_server(mock_state.clone()).await;
+    let creds = Arc::new(FaultyCredentialStore::new());
+    let (base_url, state) =
+        setup_test_server_with_creds(&mock_url, "test-client-id", creds.clone()).await;
+    let host_str = base_url.strip_prefix("http://").unwrap();
+    let client = reqwest::Client::new();
+
+    let session_cookie = login_and_get_cookie(&client, &base_url, &mock_state).await;
+
+    creds.fail_get_for("google_tokens");
+
+    let signout_resp = client
+        .post(format!("{base_url}/api/v1/auth/sign-out"))
+        .header(HOST, host_str)
+        .header(ORIGIN, &base_url)
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(signout_resp.status(), 207);
+    let body: Value = signout_resp.json().await.unwrap();
+    assert_eq!(body["status"], "signed_out_partial");
+    let failed_steps = body["failed_steps"].as_array().unwrap();
+    assert!(failed_steps
+        .iter()
+        .any(|s| s.as_str().unwrap().contains("keychain_get_google_tokens")));
+
+    let store_conn = state.store.connection();
+    let conn = store_conn.lock().unwrap();
+    let mut stmt = conn
+        .prepare("SELECT tenant_id, workspace_id, action FROM audit_logs WHERE action = 'auth_sign_out_error'")
+        .unwrap();
+    let rows: Vec<(String, String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(!rows.is_empty());
+    assert_ne!(
+        rows[0].0,
+        nexus_albaai::server::auth::DEFAULT_LOCAL_TENANT_ID
+    );
+}
+
+#[tokio::test]
+async fn test_sign_out_corrupted_token_json() {
+    let mock_state = new_mock_state("test-client-id");
+    let (mock_url, _) = start_mock_google_server(mock_state.clone()).await;
+    let (base_url, state) = setup_test_server(&mock_url, "test-client-id").await;
+    let host_str = base_url.strip_prefix("http://").unwrap();
+    let client = reqwest::Client::new();
+
+    let session_cookie = login_and_get_cookie(&client, &base_url, &mock_state).await;
+
+    state
+        .credentials
+        .set_secret("account:google-sub-12345:google_tokens", "not-valid-json")
+        .unwrap();
+
+    let signout_resp = client
+        .post(format!("{base_url}/api/v1/auth/sign-out"))
+        .header(HOST, host_str)
+        .header(ORIGIN, &base_url)
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(signout_resp.status(), 207);
+    let body: Value = signout_resp.json().await.unwrap();
+    assert_eq!(body["status"], "signed_out_partial");
+    let failed_steps = body["failed_steps"].as_array().unwrap();
+    assert!(failed_steps
+        .iter()
+        .any(|s| s.as_str().unwrap().contains("parse_google_tokens_json")));
+
+    let store_conn = state.store.connection();
+    let conn = store_conn.lock().unwrap();
+    let mut stmt = conn
+        .prepare("SELECT tenant_id, workspace_id, action FROM audit_logs WHERE action = 'auth_sign_out_error'")
+        .unwrap();
+    let rows: Vec<(String, String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(!rows.is_empty());
+    assert_ne!(
+        rows[0].0,
+        nexus_albaai::server::auth::DEFAULT_LOCAL_TENANT_ID
+    );
+}
+
+#[tokio::test]
+async fn test_sign_out_google_revocation_http_error() {
+    let mock_state = new_mock_state("test-client-id");
+    mock_state.revoke_status.store(500, Ordering::SeqCst);
+    let (mock_url, _) = start_mock_google_server(mock_state.clone()).await;
+    let (base_url, state) = setup_test_server(&mock_url, "test-client-id").await;
+    let host_str = base_url.strip_prefix("http://").unwrap();
+    let client = reqwest::Client::new();
+
+    let session_cookie = login_and_get_cookie(&client, &base_url, &mock_state).await;
+
+    let signout_resp = client
+        .post(format!("{base_url}/api/v1/auth/sign-out"))
+        .header(HOST, host_str)
+        .header(ORIGIN, &base_url)
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(signout_resp.status(), 207);
+    let body: Value = signout_resp.json().await.unwrap();
+    assert_eq!(body["status"], "signed_out_partial");
+    let failed_steps = body["failed_steps"].as_array().unwrap();
+    assert!(failed_steps
+        .iter()
+        .any(|s| s.as_str().unwrap().contains("google_revocation_http_500")));
+
+    let store_conn = state.store.connection();
+    let conn = store_conn.lock().unwrap();
+    let mut stmt = conn
+        .prepare("SELECT tenant_id, workspace_id, action FROM audit_logs WHERE action = 'auth_token_revocation_failed'")
+        .unwrap();
+    let rows: Vec<(String, String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(!rows.is_empty());
+    assert_ne!(
+        rows[0].0,
+        nexus_albaai::server::auth::DEFAULT_LOCAL_TENANT_ID
+    );
+}
+
+#[tokio::test]
+async fn test_sign_out_google_revocation_timeout() {
+    let mock_state = new_mock_state("test-client-id");
+    mock_state.revoke_delay_ms.store(5500, Ordering::SeqCst);
+    let (mock_url, _) = start_mock_google_server(mock_state.clone()).await;
+    let (base_url, state) = setup_test_server(&mock_url, "test-client-id").await;
+    let host_str = base_url.strip_prefix("http://").unwrap();
+    let client = reqwest::Client::new();
+
+    let session_cookie = login_and_get_cookie(&client, &base_url, &mock_state).await;
+
+    let signout_resp = client
+        .post(format!("{base_url}/api/v1/auth/sign-out"))
+        .header(HOST, host_str)
+        .header(ORIGIN, &base_url)
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(signout_resp.status(), 207);
+    let body: Value = signout_resp.json().await.unwrap();
+    assert_eq!(body["status"], "signed_out_partial");
+    let failed_steps = body["failed_steps"].as_array().unwrap();
+    assert!(failed_steps
+        .iter()
+        .any(|s| s.as_str().unwrap().contains("google_revocation_timeout")));
+
+    let store_conn = state.store.connection();
+    let conn = store_conn.lock().unwrap();
+    let mut stmt = conn
+        .prepare("SELECT tenant_id, workspace_id, action FROM audit_logs WHERE action = 'auth_token_revocation_failed'")
+        .unwrap();
+    let rows: Vec<(String, String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(!rows.is_empty());
+    assert_ne!(
+        rows[0].0,
+        nexus_albaai::server::auth::DEFAULT_LOCAL_TENANT_ID
+    );
+}
+
+#[tokio::test]
+async fn test_sign_out_audit_log_error() {
+    let mock_state = new_mock_state("test-client-id");
+    let (mock_url, _) = start_mock_google_server(mock_state.clone()).await;
+    let (base_url, state) = setup_test_server(&mock_url, "test-client-id").await;
+    let host_str = base_url.strip_prefix("http://").unwrap();
+    let client = reqwest::Client::new();
+
+    let session_cookie = login_and_get_cookie(&client, &base_url, &mock_state).await;
+
+    state
+        .credentials
+        .set_secret("account:google-sub-12345:google_tokens", "corrupted")
+        .unwrap();
+    let store_conn = state.store.connection();
+    store_conn
+        .lock()
+        .unwrap()
+        .execute("DROP TABLE audit_logs;", [])
+        .unwrap();
+
+    let signout_resp = client
+        .post(format!("{base_url}/api/v1/auth/sign-out"))
+        .header(HOST, host_str)
+        .header(ORIGIN, &base_url)
+        .header(COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(signout_resp.status(), 207);
+    let body: Value = signout_resp.json().await.unwrap();
+    assert_eq!(body["status"], "signed_out_partial");
+    let failed_steps = body["failed_steps"].as_array().unwrap();
+    assert!(failed_steps
+        .iter()
+        .any(|s| s.as_str().unwrap().contains("record_audit_log")));
 }

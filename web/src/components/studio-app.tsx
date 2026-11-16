@@ -21,6 +21,7 @@ import { TeamEvolutionOverview } from "@/components/team-evolution-overview";
 import { WorkspaceApp } from "@/components/workspace/workspace-app";
 import { WorkspaceProvider, useWorkspace } from "@/components/workspace/workspace-context";
 import { apiRequest, readError, tokenExpiry } from "@/lib/api";
+import { resolveAccountIdentity, shouldDisplayLegacyPrompt, handleSignOutResult } from "@/lib/account-state.mjs";
 import { getDesktop } from "@/lib/desktop";
 import { actionFor, formatCombo, loadBindings, saveBindings, type Bindings } from "@/lib/shortcuts.mjs";
 import { INITIAL_DOCK, dockAfter, loadProjects, type DockTab } from "@/lib/shell.mjs";
@@ -291,11 +292,10 @@ function AccountRow({
     };
   }, [open]);
 
-  const authenticated = Boolean(session?.authenticated && session?.user);
+  const identity = resolveAccountIdentity(session, t("account.signedOut"));
+  const authenticated = identity.authenticated;
   const user = session?.user ?? null;
-  const label = authenticated
-    ? user?.name || user?.email || t("account.googleAccount")
-    : t("account.signedOut");
+  const label = identity.label;
   const choose = (run: () => void) => () => {
     setOpen(false);
     run();
@@ -335,7 +335,7 @@ function AccountRow({
             </div>
             <small>{t("profile.activeAI")}: {selected ? modelLabel(selected) : t("profile.noModel")}</small>
           </header>
-          {session?.has_unclaimed_legacy_data && authenticated && (
+          {shouldDisplayLegacyPrompt(session) && (
             <div style={{ padding: "8px 10px", margin: "4px 8px 8px", background: "rgba(66, 133, 244, 0.08)", borderRadius: "6px", fontSize: "11px" }}>
               <p style={{ margin: "0 0 6px" }}>{t("account.legacyPrompt")}</p>
               <div style={{ display: "flex", gap: "6px" }}>
@@ -630,9 +630,12 @@ export function StudioApp({ initialPage = "studio" }: { initialPage?: NavPage })
   }, [session, refreshSession]);
 
   const logout = useCallback(async () => {
-    try { await apiRequest("/api/v1/auth/sign-out", "", { method: "POST" }); } catch { /* ignore */ }
+    try {
+      const res = await apiRequest<{ status: string; failed_steps?: string[] }>("/api/v1/auth/sign-out", "", { method: "POST" });
+      handleSignOutResult(res);
+    } catch { }
     saveToken("");
-    try { window.localStorage.removeItem("nexus_user_plan"); } catch { /* ignore */ }
+    try { window.localStorage.removeItem("nexus_user_plan"); } catch { }
     await refreshSession();
     setAccountOpen(true);
   }, [refreshSession, saveToken]);

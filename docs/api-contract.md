@@ -300,22 +300,33 @@ The frontend is the unmodified `NexusAgent/apps/web` (Next.js 15, Tailwind v3).
   ```
   - `cancel_runs`: boolean (default: `true`). If `true`, cancels all in-flight runs for this account's tenant.
 - **Revocation Sequence**:
-  1. Rotates/deletes session signing key in Keychain (`account:{sub}:jwt_secret`).
-  2. If online, invokes Google token revocation endpoint (`https://oauth2.googleapis.com/revoke?token=...` or mock revocation).
-  3. Records revocation status in audit trail (auditing any network revocation error; never reports false revocation success).
+  1. Local session is invalidated immediately from active memory and cookie deletion header (`Set-Cookie: session_id=; Max-Age=0`) is issued regardless of subsequent failures.
+  2. Rotates/deletes session signing key in Keychain (`account:{sub}:jwt_secret`).
+  3. If stored Google tokens exist, invokes Google token revocation endpoint (`https://oauth2.googleapis.com/revoke?token=...` or mock revocation) with a 5-second timeout.
   4. Deletes stored OAuth tokens from Keychain (`account:{sub}:google_tokens`).
   5. Marks account inactive in SQLite metadata.
-  6. Any subsequent request bearing the old session token fails closed with `401 Unauthorized`.
-- **Response**: `200 OK`
+  6. Records revocation status and any errors in audit trail using the account's tenant and workspace (never reports false revocation success).
+  7. Any subsequent request bearing the old session token fails closed with `401 Unauthorized`.
+- **Response (Full Success)**: `200 OK`
   ```json
   {
-    "status": "signed_out"
+    "status": "signed_out",
+    "failed_steps": []
   }
   ```
+- **Response (Partial Failure)**: `207 Multi-Status`
+  ```json
+  {
+    "status": "signed_out_partial",
+    "failed_steps": [
+      "google_revocation_http_500"
+    ]
+  }
+  ```
+  Note: Local session invalidation and cookie clearing always succeed; `failed_steps` enumerates downstream errors (e.g. `google_revocation_http_500`, `google_revocation_timeout`, `keychain_delete_jwt_secret`).
 - **Error Codes**:
   - `401 Unauthorized`: Missing or invalid session.
   - `403 Forbidden`: Untrusted `Host` or `Origin` header.
-  - `500 Internal Server Error`: Keychain deletion failure.
 
 ---
 

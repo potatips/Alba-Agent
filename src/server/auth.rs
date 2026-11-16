@@ -180,6 +180,14 @@ pub fn generate_pkce_challenge(verifier: &str) -> String {
     base64url_encode(&hash)
 }
 
+fn is_trusted_origin(orig: &str) -> bool {
+    orig.starts_with("http://127.0.0.1")
+        || orig.starts_with("http://localhost")
+        || orig.starts_with("tauri://localhost")
+        || orig.starts_with("http://tauri.localhost")
+        || orig.starts_with("https://tauri.localhost")
+}
+
 pub fn validate_host_and_origin(parts: &Parts, is_mutating: bool) -> Result<(), ApiError> {
     let host = parts
         .headers
@@ -201,21 +209,11 @@ pub fn validate_host_and_origin(parts: &Parts, is_mutating: bool) -> Result<(), 
     if is_mutating {
         let orig = origin
             .ok_or_else(|| ApiError::forbidden("Missing Origin header on mutating request"))?;
-        let is_valid_origin = orig.starts_with("http://127.0.0.1")
-            || orig.starts_with("http://localhost")
-            || orig.starts_with("tauri://localhost")
-            || orig.starts_with("http://tauri.localhost")
-            || orig.starts_with("https://tauri.localhost");
-        if !is_valid_origin {
+        if !is_trusted_origin(orig) {
             return Err(ApiError::forbidden("Untrusted Origin header"));
         }
     } else if let Some(orig) = origin {
-        let is_valid_origin = orig.starts_with("http://127.0.0.1")
-            || orig.starts_with("http://localhost")
-            || orig.starts_with("tauri://localhost")
-            || orig.starts_with("http://tauri.localhost")
-            || orig.starts_with("https://tauri.localhost");
-        if !is_valid_origin {
+        if !is_trusted_origin(orig) {
             return Err(ApiError::forbidden("Untrusted Origin header"));
         }
     }

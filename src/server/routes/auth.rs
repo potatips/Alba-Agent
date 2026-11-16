@@ -395,7 +395,7 @@ pub async fn google_callback_handler(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let jwt_key = format!("account:{sub}:jwt_secret");
-    let _ = state
+    state
         .credentials
         .get_or_set_secret(&jwt_key, &crate::credentials::generate_secure_secret)
         .map_err(|e| ApiError::internal(e.to_string()))?;
@@ -514,6 +514,8 @@ pub async fn sign_out_handler(
 
     let mut current_sub: Option<String> = None;
     let mut current_sid: Option<String> = None;
+    let mut current_tenant: Option<String> = None;
+    let mut current_workspace: Option<String> = None;
 
     if let Some(cookie_hdr) = parts
         .headers
@@ -529,6 +531,8 @@ pub async fn sign_out_handler(
                     if let Some(s) = sessions.get(sid) {
                         current_sub = Some(s.sub.clone());
                         current_sid = Some(sid.to_string());
+                        current_tenant = Some(s.tenant_id.clone());
+                        current_workspace = Some(s.workspace_id.clone());
                     }
                 }
             }
@@ -544,12 +548,49 @@ pub async fn sign_out_handler(
             if let Some(token) = auth_hdr.strip_prefix("Bearer ").map(|s| s.trim()) {
                 if let Ok(claims) = crate::server::auth::verify_token_with_state(token, &state) {
                     current_sub = Some(claims.sub);
+                    current_tenant = Some(claims.tenant_id);
+                    current_workspace = Some(claims.workspace_id);
                 }
             }
         }
     }
 
     let sub = current_sub.ok_or_else(|| ApiError::unauthorized("No active session to sign out"))?;
+
+    if let Some(sid) = &current_sid {
+        state.active_sessions.lock().await.remove(sid);
+    }
+    {
+        let mut sessions = state.active_sessions.lock().await;
+        sessions.retain(|_, s| s.sub != sub);
+    }
+
+    let (tenant_id_str, workspace_id_str) = match (current_tenant, current_workspace) {
+        (Some(t), Some(w)) => (t, w),
+        _ => {
+            if let Ok(Some(acc)) = state.store.get_account_by_sub(&sub) {
+                (acc.tenant_id, acc.workspace_id)
+            } else {
+                (
+                    crate::server::auth::DEFAULT_LOCAL_TENANT_ID.to_string(),
+                    crate::server::auth::DEFAULT_LOCAL_WORKSPACE_ID.to_string(),
+                )
+            }
+        }
+    };
+    let tenant_uuid = uuid::Uuid::parse_str(&tenant_id_str).unwrap_or_else(|_| {
+        uuid::Uuid::parse_str(crate::server::auth::DEFAULT_LOCAL_TENANT_ID).unwrap()
+    });
+    let workspace_uuid = uuid::Uuid::parse_str(&workspace_id_str).unwrap_or_else(|_| {
+        uuid::Uuid::parse_str(crate::server::auth::DEFAULT_LOCAL_WORKSPACE_ID).unwrap()
+    });
+    let audit_scope =
+        crate::domain::ExecutionScope::new(tenant_uuid, workspace_uuid, uuid::Uuid::new_v4())
+            .unwrap_or_else(|_| crate::domain::ExecutionScope {
+                tenant_id: tenant_uuid,
+                workspace_id: workspace_uuid,
+                run_id: uuid::Uuid::new_v4(),
+            });
 
     let req: SignOutRequest = if bytes.is_empty() {
         SignOutRequest::default()
@@ -560,69 +601,234 @@ pub async fn sign_out_handler(
     if req.cancel_runs.unwrap_or(true) {
         let cancellations = state.active_cancellations.lock().await;
         for sender in cancellations.values() {
-            let _ = sender.send(true);
+            if let Err(err) = sender.send(true) {
+                eprintln!("run cancellation signal dropped: {err}");
+            }
         }
     }
 
+    let mut failed_steps: Vec<String> = Vec::new();
+
     let tokens_key = format!("account:{sub}:google_tokens");
-    let tokens_json = state.credentials.get_secret(&tokens_key).ok().flatten();
+    match state.credentials.get_secret(&tokens_key) {
+        Ok(Some(json_str)) => match serde_json::from_str::<serde_json::Value>(&json_str) {
+            Ok(tokens) => {
+                let token_to_revoke = tokens
+                    .get("refresh_token")
+                    .or_else(|| tokens.get("access_token"))
+                    .and_then(|v| v.as_str());
 
-    if let Some(json_str) = tokens_json {
-        if let Ok(tokens) = serde_json::from_str::<serde_json::Value>(&json_str) {
-            let token_to_revoke = tokens
-                .get("refresh_token")
-                .or_else(|| tokens.get("access_token"))
-                .and_then(|v| v.as_str());
+                if let Some(tok) = token_to_revoke {
+                    let client_builder = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(5))
+                        .build();
 
-            if let Some(tok) = token_to_revoke {
-                let client = reqwest::Client::new();
-                let res = client
-                    .post(&state.google_revoke_url)
-                    .form(&[("token", tok)])
-                    .send()
-                    .await;
-                if let Err(e) = res {
+                    match client_builder {
+                        Ok(client) => {
+                            let res = client
+                                .post(&state.google_revoke_url)
+                                .form(&[("token", tok)])
+                                .send()
+                                .await;
+
+                            match res {
+                                Ok(resp) => {
+                                    let status_code = resp.status();
+                                    if !status_code.is_success() {
+                                        let step = format!(
+                                            "google_revocation_http_{}",
+                                            status_code.as_u16()
+                                        );
+                                        failed_steps.push(step.clone());
+                                        use crate::checkpoints::store::CheckpointStore;
+                                        let entry = crate::checkpoints::types::AuditLogEntry {
+                                            id: uuid::Uuid::new_v4(),
+                                            scope: audit_scope,
+                                            actor_id: Some(sub.clone()),
+                                            action: "auth_token_revocation_failed".to_string(),
+                                            target_id: None,
+                                            details: serde_json::json!({
+                                                "status_code": status_code.as_u16(),
+                                                "error": format!("Google revocation returned HTTP {}", status_code.as_u16()),
+                                            }),
+                                            created_at: Utc::now(),
+                                        };
+                                        if let Err(e) = state.store.record_audit_log(&entry).await {
+                                            failed_steps.push(format!("record_audit_log: {e}"));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    let is_timeout = e.is_timeout();
+                                    let step = if is_timeout {
+                                        "google_revocation_timeout".to_string()
+                                    } else {
+                                        format!("google_revocation_network: {e}")
+                                    };
+                                    failed_steps.push(step.clone());
+                                    use crate::checkpoints::store::CheckpointStore;
+                                    let entry = crate::checkpoints::types::AuditLogEntry {
+                                        id: uuid::Uuid::new_v4(),
+                                        scope: audit_scope,
+                                        actor_id: Some(sub.clone()),
+                                        action: "auth_token_revocation_failed".to_string(),
+                                        target_id: None,
+                                        details: serde_json::json!({
+                                            "error": e.to_string(),
+                                            "is_timeout": is_timeout,
+                                        }),
+                                        created_at: Utc::now(),
+                                    };
+                                    if let Err(e) = state.store.record_audit_log(&entry).await {
+                                        failed_steps.push(format!("record_audit_log: {e}"));
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let step = format!("http_client_build: {e}");
+                            failed_steps.push(step.clone());
+                            use crate::checkpoints::store::CheckpointStore;
+                            let entry = crate::checkpoints::types::AuditLogEntry {
+                                id: uuid::Uuid::new_v4(),
+                                scope: audit_scope,
+                                actor_id: Some(sub.clone()),
+                                action: "auth_sign_out_error".to_string(),
+                                target_id: None,
+                                details: serde_json::json!({ "error": step }),
+                                created_at: Utc::now(),
+                            };
+                            if let Err(e) = state.store.record_audit_log(&entry).await {
+                                failed_steps.push(format!("record_audit_log: {e}"));
+                            }
+                        }
+                    }
+                } else {
+                    let step = "missing_token_in_stored_credentials".to_string();
+                    failed_steps.push(step.clone());
                     use crate::checkpoints::store::CheckpointStore;
-                    let audit_entry = crate::checkpoints::types::AuditLogEntry {
+                    let entry = crate::checkpoints::types::AuditLogEntry {
                         id: uuid::Uuid::new_v4(),
-                        scope: crate::domain::ExecutionScope::new(
-                            uuid::Uuid::nil(),
-                            uuid::Uuid::parse_str(crate::server::auth::DEFAULT_LOCAL_TENANT_ID)
-                                .unwrap(),
-                            uuid::Uuid::parse_str(crate::server::auth::DEFAULT_LOCAL_WORKSPACE_ID)
-                                .unwrap(),
-                        )
-                        .unwrap(),
+                        scope: audit_scope,
                         actor_id: Some(sub.clone()),
-                        action: "auth_token_revocation_failed".to_string(),
+                        action: "auth_sign_out_error".to_string(),
                         target_id: None,
-                        details: serde_json::json!({
-                            "error": e.to_string(),
-                        }),
+                        details: serde_json::json!({ "error": step }),
                         created_at: Utc::now(),
                     };
-                    let _ = state.store.record_audit_log(&audit_entry).await;
+                    if let Err(e) = state.store.record_audit_log(&entry).await {
+                        failed_steps.push(format!("record_audit_log: {e}"));
+                    }
                 }
+            }
+            Err(e) => {
+                let step = format!("parse_google_tokens_json: {e}");
+                failed_steps.push(step.clone());
+                use crate::checkpoints::store::CheckpointStore;
+                let entry = crate::checkpoints::types::AuditLogEntry {
+                    id: uuid::Uuid::new_v4(),
+                    scope: audit_scope,
+                    actor_id: Some(sub.clone()),
+                    action: "auth_sign_out_error".to_string(),
+                    target_id: None,
+                    details: serde_json::json!({ "error": step }),
+                    created_at: Utc::now(),
+                };
+                if let Err(e) = state.store.record_audit_log(&entry).await {
+                    failed_steps.push(format!("record_audit_log: {e}"));
+                }
+            }
+        },
+        Ok(None) => {}
+        Err(e) => {
+            let step = format!("keychain_get_google_tokens: {e}");
+            failed_steps.push(step.clone());
+            use crate::checkpoints::store::CheckpointStore;
+            let entry = crate::checkpoints::types::AuditLogEntry {
+                id: uuid::Uuid::new_v4(),
+                scope: audit_scope,
+                actor_id: Some(sub.clone()),
+                action: "auth_sign_out_error".to_string(),
+                target_id: None,
+                details: serde_json::json!({ "error": step }),
+                created_at: Utc::now(),
+            };
+            if let Err(e) = state.store.record_audit_log(&entry).await {
+                failed_steps.push(format!("record_audit_log: {e}"));
             }
         }
     }
 
     let jwt_key = format!("account:{sub}:jwt_secret");
-    let _ = state.credentials.delete_secret(&jwt_key);
-    let _ = state.credentials.delete_secret(&tokens_key);
-    let _ = state.store.deactivate_all_google_accounts();
-
-    if let Some(sid) = current_sid {
-        state.active_sessions.lock().await.remove(&sid);
+    if let Err(e) = state.credentials.delete_secret(&jwt_key) {
+        let step = format!("keychain_delete_jwt_secret: {e}");
+        failed_steps.push(step.clone());
+        use crate::checkpoints::store::CheckpointStore;
+        let entry = crate::checkpoints::types::AuditLogEntry {
+            id: uuid::Uuid::new_v4(),
+            scope: audit_scope,
+            actor_id: Some(sub.clone()),
+            action: "auth_sign_out_error".to_string(),
+            target_id: None,
+            details: serde_json::json!({ "error": step }),
+            created_at: Utc::now(),
+        };
+        if let Err(e) = state.store.record_audit_log(&entry).await {
+            failed_steps.push(format!("record_audit_log: {e}"));
+        }
     }
 
+    if let Err(e) = state.credentials.delete_secret(&tokens_key) {
+        let step = format!("keychain_delete_google_tokens: {e}");
+        failed_steps.push(step.clone());
+        use crate::checkpoints::store::CheckpointStore;
+        let entry = crate::checkpoints::types::AuditLogEntry {
+            id: uuid::Uuid::new_v4(),
+            scope: audit_scope,
+            actor_id: Some(sub.clone()),
+            action: "auth_sign_out_error".to_string(),
+            target_id: None,
+            details: serde_json::json!({ "error": step }),
+            created_at: Utc::now(),
+        };
+        if let Err(e) = state.store.record_audit_log(&entry).await {
+            failed_steps.push(format!("record_audit_log: {e}"));
+        }
+    }
+
+    if let Err(e) = state.store.deactivate_all_google_accounts() {
+        let step = format!("deactivate_all_google_accounts: {e}");
+        failed_steps.push(step.clone());
+        use crate::checkpoints::store::CheckpointStore;
+        let entry = crate::checkpoints::types::AuditLogEntry {
+            id: uuid::Uuid::new_v4(),
+            scope: audit_scope,
+            actor_id: Some(sub.clone()),
+            action: "auth_sign_out_error".to_string(),
+            target_id: None,
+            details: serde_json::json!({ "error": step }),
+            created_at: Utc::now(),
+        };
+        if let Err(e) = state.store.record_audit_log(&entry).await {
+            failed_steps.push(format!("record_audit_log: {e}"));
+        }
+    }
+
+    let (http_status, status_str) = if failed_steps.is_empty() {
+        (axum::http::StatusCode::OK, "signed_out")
+    } else {
+        (axum::http::StatusCode::MULTI_STATUS, "signed_out_partial")
+    };
+
     let resp_body = serde_json::json!({
-        "status": "signed_out"
+        "status": status_str,
+        "failed_steps": failed_steps
     });
 
     let mut response = Response::new(axum::body::Body::from(
         serde_json::to_string(&resp_body).unwrap(),
     ));
+    *response.status_mut() = http_status;
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());

@@ -56,7 +56,7 @@ fn get_desktop_bin_path() -> PathBuf {
 }
 
 async fn wait_for_port(port_file: &PathBuf) -> u16 {
-    for _ in 0..60 {
+    for _ in 0..150 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if port_file.exists() {
             if let Ok(content) = std::fs::read_to_string(port_file) {

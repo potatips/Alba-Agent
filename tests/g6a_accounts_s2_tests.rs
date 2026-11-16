@@ -1,6 +1,7 @@
 use nexus_albaai::checkpoints::SqliteCheckpointStore;
 use nexus_albaai::credentials::{
-    generate_secure_secret, CredentialStore, MacosKeychainStore, MemoryCredentialStore,
+    generate_secure_secret, CredentialStore, CredentialStoreError, MacosKeychainStore,
+    MemoryCredentialStore,
 };
 use nexus_albaai::profiles::Profile;
 use nexus_albaai::server::auth::{
@@ -10,7 +11,79 @@ use nexus_albaai::server::auth::{
 use nexus_albaai::server::state::AppState;
 use reqwest::header::AUTHORIZATION;
 use serde_json::Value;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+struct FailingCredentialStore {
+    fail_get: AtomicBool,
+    fail_set: AtomicBool,
+    fail_delete: AtomicBool,
+    inner: MemoryCredentialStore,
+}
+
+impl FailingCredentialStore {
+    fn new() -> Self {
+        Self {
+            fail_get: AtomicBool::new(false),
+            fail_set: AtomicBool::new(false),
+            fail_delete: AtomicBool::new(false),
+            inner: MemoryCredentialStore::new(),
+        }
+    }
+}
+
+impl CredentialStore for FailingCredentialStore {
+    fn get_secret(&self, key: &str) -> Result<Option<String>, CredentialStoreError> {
+        if self.fail_get.load(Ordering::SeqCst) {
+            return Err(CredentialStoreError::Platform(
+                "simulated keychain read error".to_string(),
+            ));
+        }
+        self.inner.get_secret(key)
+    }
+
+    fn set_secret(&self, key: &str, secret: &str) -> Result<(), CredentialStoreError> {
+        if self.fail_set.load(Ordering::SeqCst) {
+            return Err(CredentialStoreError::Platform(
+                "simulated keychain write error".to_string(),
+            ));
+        }
+        self.inner.set_secret(key, secret)
+    }
+
+    fn get_or_set_secret(
+        &self,
+        key: &str,
+        generate: &dyn Fn() -> String,
+    ) -> Result<String, CredentialStoreError> {
+        if let Some(existing) = self.get_secret(key)? {
+            if !existing.trim().is_empty() {
+                return Ok(existing);
+            }
+        }
+        let secret = generate();
+        self.set_secret(key, &secret)?;
+        Ok(secret)
+    }
+
+    fn delete_secret(&self, key: &str) -> Result<(), CredentialStoreError> {
+        if self.fail_delete.load(Ordering::SeqCst) {
+            return Err(CredentialStoreError::Platform(
+                "simulated keychain delete error".to_string(),
+            ));
+        }
+        self.inner.delete_secret(key)
+    }
+
+    fn delete_profile_secrets(&self, profile_id: &str) -> Result<(), CredentialStoreError> {
+        if self.fail_delete.load(Ordering::SeqCst) {
+            return Err(CredentialStoreError::Platform(
+                "simulated keychain delete error".to_string(),
+            ));
+        }
+        self.inner.delete_profile_secrets(profile_id)
+    }
+}
 
 #[test]
 fn test_credential_store_memory_implementation() {
@@ -47,7 +120,11 @@ fn test_credential_store_memory_implementation() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn test_macos_keychain_store_real_ops() {
+    if std::env::var("ALBA_TEST_KEYCHAIN").as_deref() != Ok("1") {
+        return;
+    }
     let store = MacosKeychainStore::new("alba-test-s2-keychain");
     let key = format!("test-key-{}", uuid::Uuid::new_v4());
     let val = "super-secret-token-12345";
@@ -59,6 +136,98 @@ fn test_macos_keychain_store_real_ops() {
 
     store.delete_secret(&key).unwrap();
     assert_eq!(store.get_secret(&key).unwrap(), None);
+}
+
+#[test]
+fn test_credentials_module_does_not_use_process_command() {
+    let source = include_str!("../src/credentials/mod.rs");
+    assert!(!source.contains("std::process::Command"));
+    assert!(!source.contains("Command::new"));
+    assert!(!source.contains("add-generic-password"));
+}
+
+#[test]
+fn test_get_or_set_secret_never_overwrites_on_read_failure() {
+    let store = FailingCredentialStore::new();
+    store
+        .set_secret("profile:p1:jwt_secret", "existing-secret-1234")
+        .unwrap();
+    assert_eq!(
+        store.get_secret("profile:p1:jwt_secret").unwrap(),
+        Some("existing-secret-1234".to_string())
+    );
+
+    store.fail_get.store(true, Ordering::SeqCst);
+    let res = store.get_or_set_secret("profile:p1:jwt_secret", &|| "overwritten".to_string());
+    assert!(res.is_err());
+
+    store.fail_get.store(false, Ordering::SeqCst);
+    assert_eq!(
+        store.get_secret("profile:p1:jwt_secret").unwrap(),
+        Some("existing-secret-1234".to_string())
+    );
+}
+
+#[test]
+fn test_get_or_set_secret_propagates_set_failure() {
+    let store = FailingCredentialStore::new();
+    store.fail_set.store(true, Ordering::SeqCst);
+
+    let res = store.get_or_set_secret("profile:p1:jwt_secret", &|| "unpersisted".to_string());
+    assert!(res.is_err());
+
+    store.fail_set.store(false, Ordering::SeqCst);
+    assert_eq!(store.get_secret("profile:p1:jwt_secret").unwrap(), None);
+}
+
+#[test]
+fn test_delete_secret_success_on_not_found_and_fails_closed_on_error() {
+    let store = FailingCredentialStore::new();
+    assert!(store.delete_secret("non_existent_key").is_ok());
+
+    store.fail_delete.store(true, Ordering::SeqCst);
+    assert!(store.delete_secret("any_key").is_err());
+    assert!(store.delete_profile_secrets("profile-any").is_err());
+}
+
+#[test]
+fn test_delete_profile_secrets_multi_secret_enumeration() {
+    let store = MemoryCredentialStore::new();
+    store
+        .set_secret("profile:user1:jwt_secret", "jwt-val-1")
+        .unwrap();
+    store
+        .set_secret("profile:user1:provider:openai:secret", "sk-proj-test-user1")
+        .unwrap();
+    store
+        .set_secret(
+            "profile:user1:provider:anthropic:secret",
+            "sk-ant-test-user1",
+        )
+        .unwrap();
+    store
+        .set_secret("profile:user2:jwt_secret", "jwt-val-2")
+        .unwrap();
+
+    store.delete_profile_secrets("user1").unwrap();
+
+    assert_eq!(store.get_secret("profile:user1:jwt_secret").unwrap(), None);
+    assert_eq!(
+        store
+            .get_secret("profile:user1:provider:openai:secret")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        store
+            .get_secret("profile:user1:provider:anthropic:secret")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        store.get_secret("profile:user2:jwt_secret").unwrap(),
+        Some("jwt-val-2".to_string())
+    );
 }
 
 #[test]

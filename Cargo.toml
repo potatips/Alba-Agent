@@ -33,6 +33,9 @@ regex = "1.13.1"
 tempfile = "3.17.1"
 nexus-albaai = { path = ".", features = ["failpoints"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7.0"
+
 [features]
 default = []
 failpoints = []

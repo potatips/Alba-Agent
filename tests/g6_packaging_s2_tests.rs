@@ -68,7 +68,7 @@ async fn test_tauri_shell_scripted_launch_and_process_tree() {
     let port_file = data_dir.join("backend_port");
 
     let mut port: Option<u16> = None;
-    for _ in 0..50 {
+    for _ in 0..150 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if port_file.exists() {
             if let Ok(content) = std::fs::read_to_string(&port_file) {

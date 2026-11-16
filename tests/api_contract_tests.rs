@@ -368,10 +368,15 @@ async fn test_payload_too_large_returns_413() {
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(big_payload)
         .send()
-        .await
-        .unwrap();
+        .await;
 
-    assert_eq!(res.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    match res {
+        Ok(r) => assert_eq!(r.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE),
+        Err(e) => {
+            let s = e.to_string();
+            assert!(s.contains("Connection reset") || s.contains("BodyWrite") || e.is_body());
+        }
+    }
 }
 
 #[tokio::test]

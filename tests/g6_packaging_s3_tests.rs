@@ -13,11 +13,27 @@ use serde_json::Value;
 use uuid::Uuid;
 
 fn get_desktop_bin_path() -> PathBuf {
-    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+    let path = if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
         PathBuf::from(target_dir).join("debug/alba-agent")
     } else {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/alba-agent")
+    };
+    if !path.exists() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut cmd = Command::new("cargo");
+        cmd.arg("build")
+            .arg("--package")
+            .arg("alba-agent-desktop")
+            .arg("--bin")
+            .arg("alba-agent")
+            .current_dir(&manifest_dir);
+        if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+            cmd.env("CARGO_TARGET_DIR", target_dir);
+        }
+        let status = cmd.status().expect("failed to build alba-agent binary");
+        assert!(status.success(), "cargo build alba-agent failed");
     }
+    path
 }
 
 async fn wait_for_port(port_file: &PathBuf) -> u16 {

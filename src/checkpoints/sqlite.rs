@@ -21,6 +21,7 @@ use crate::domain::{
     ExecutionScope, MessageRole, RunStatus, ToolCall,
 };
 use crate::events::types::{RuntimeEvent, RuntimeEventType};
+use crate::profiles::Profile;
 use crate::schema::ApprovalRequestSpec;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -646,6 +647,39 @@ impl SqliteCheckpointStore {
 
                 INSERT INTO schema_migrations (version, applied_at)
                 VALUES (11, datetime('now'));
+                ",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        }
+
+        if current_version < 12 {
+            conn.execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS profiles (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    email TEXT,
+                    is_local INTEGER NOT NULL DEFAULT 1,
+                    active INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS provider_connections (
+                    id TEXT PRIMARY KEY,
+                    profile_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    auth_type TEXT NOT NULL,
+                    account_label TEXT,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_provider_connections_profile ON provider_connections(profile_id);
+
+                INSERT INTO schema_migrations (version, applied_at)
+                VALUES (12, datetime('now'));
                 ",
             )
             .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
@@ -2088,6 +2122,230 @@ impl SqliteCheckpointStore {
             scored.truncate(top_k);
         }
         Ok(scored)
+    }
+
+    pub fn create_profile(&self, profile: &Profile) -> Result<Profile, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        conn.execute(
+            "INSERT INTO profiles (id, name, email, is_local, active, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                profile.id,
+                profile.name,
+                profile.email,
+                if profile.is_local { 1 } else { 0 },
+                if profile.active { 1 } else { 0 },
+                profile.created_at,
+                profile.updated_at,
+            ],
+        )
+        .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        Ok(profile.clone())
+    }
+
+    pub fn get_profile(&self, id: &str) -> Result<Option<Profile>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, email, is_local, active, created_at, updated_at
+                 FROM profiles WHERE id = ?1",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut rows = stmt
+            .query(params![id])
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        if let Some(row) = rows
+            .next()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?
+        {
+            let is_local_int: i64 = row
+                .get(3)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let active_int: i64 = row
+                .get(4)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            Ok(Some(Profile {
+                id: row
+                    .get(0)
+                    .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?,
+                name: row
+                    .get(1)
+                    .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?,
+                email: row
+                    .get(2)
+                    .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?,
+                is_local: is_local_int != 0,
+                active: active_int != 0,
+                created_at: row
+                    .get(5)
+                    .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?,
+                updated_at: row
+                    .get(6)
+                    .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_active_profile(&self) -> Result<Option<Profile>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, email, is_local, active, created_at, updated_at
+                 FROM profiles WHERE active = 1 ORDER BY updated_at DESC LIMIT 1",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        if let Some(row) = rows
+            .next()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?
+        {
+            let is_local_int: i64 = row
+                .get(3)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let active_int: i64 = row
+                .get(4)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            Ok(Some(Profile {
+                id: row
+                    .get(0)
+                    .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?,
+                name: row
+                    .get(1)
+                    .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?,
+                email: row
+                    .get(2)
+                    .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?,
+                is_local: is_local_int != 0,
+                active: active_int != 0,
+                created_at: row
+                    .get(5)
+                    .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?,
+                updated_at: row
+                    .get(6)
+                    .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn set_active_profile(&self, id: &str) -> Result<(), CheckpointError> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        tx.execute("UPDATE profiles SET active = 0", [])
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let now = Utc::now().timestamp();
+        let changed = tx
+            .execute(
+                "UPDATE profiles SET active = 1, updated_at = ?2 WHERE id = ?1",
+                params![id, now],
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        if changed == 0 {
+            return Err(CheckpointError::NotFound(format!("Profile {id} not found")));
+        }
+        tx.commit()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn list_profiles(&self) -> Result<Vec<Profile>, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, email, is_local, active, created_at, updated_at
+                 FROM profiles ORDER BY created_at ASC",
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let mut list = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?
+        {
+            let is_local_int: i64 = row
+                .get(3)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            let active_int: i64 = row
+                .get(4)
+                .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+            list.push(Profile {
+                id: row
+                    .get(0)
+                    .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?,
+                name: row
+                    .get(1)
+                    .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?,
+                email: row
+                    .get(2)
+                    .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?,
+                is_local: is_local_int != 0,
+                active: active_int != 0,
+                created_at: row
+                    .get(5)
+                    .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?,
+                updated_at: row
+                    .get(6)
+                    .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?,
+            });
+        }
+        Ok(list)
+    }
+
+    pub fn delete_profile(&self, id: &str) -> Result<bool, CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let changed = conn
+            .execute("DELETE FROM profiles WHERE id = ?1", params![id])
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        Ok(changed > 0)
+    }
+
+    pub fn ensure_default_profile(&self) -> Result<Profile, CheckpointError> {
+        if let Some(profile) = self.get_active_profile()? {
+            return Ok(profile);
+        }
+        let list = self.list_profiles()?;
+        if let Some(first) = list.first() {
+            self.set_active_profile(&first.id)?;
+            return Ok(first.clone());
+        }
+        let now = Utc::now().timestamp();
+        let default_profile = Profile {
+            id: "default".to_string(),
+            name: "Local Profile".to_string(),
+            email: None,
+            is_local: true,
+            active: true,
+            created_at: now,
+            updated_at: now,
+        };
+        self.create_profile(&default_profile)
     }
 }
 

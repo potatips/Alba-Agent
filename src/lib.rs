@@ -1,11 +1,13 @@
 pub mod agent;
 pub mod checkpoints;
 pub mod cli;
+pub mod credentials;
 pub mod domain;
 pub mod events;
 pub mod governance;
 pub mod memory;
 pub mod models;
+pub mod profiles;
 pub mod sandbox;
 pub mod schema;
 pub mod server;

@@ -1,14 +1,13 @@
-use axum::extract::FromRequestParts;
+use axum::extract::{FromRef, FromRequestParts};
 use axum::http::request::Parts;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::server::error::ApiError;
 
-pub const DEFAULT_JWT_SECRET: &str = "alba-local-development-secret-key-32b!";
 pub const DEFAULT_LOCAL_USER_EMAIL: &str = "local@nexus.local";
 pub const DEFAULT_LOCAL_USER_DISPLAY_NAME: &str = "Workspace Owner";
-pub const DEFAULT_LOCAL_USER_PLAN: &str = "ENTERPRISE";
+pub const DEFAULT_LOCAL_USER_PLAN: &str = "LOCAL";
 pub const DEFAULT_LOCAL_TENANT_ID: &str = "00000000-0000-0000-0000-000000000001";
 pub const DEFAULT_LOCAL_WORKSPACE_ID: &str = "00000000-0000-0000-0000-000000000002";
 pub const DEFAULT_LOCAL_USER_ID: &str = "00000000-0000-0000-0000-000000000003";
@@ -137,16 +136,50 @@ pub fn verify_token(token: &str, secret: &str) -> Result<LocalSessionClaims, Api
     Ok(claims)
 }
 
+pub fn verify_token_with_state(
+    token: &str,
+    state: &crate::server::state::AppState,
+) -> Result<LocalSessionClaims, ApiError> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err(ApiError::unauthorized("Invalid token structure"));
+    }
+    let payload_bytes = base64url_decode(parts[1])?;
+    let unverified: LocalSessionClaims = serde_json::from_slice(&payload_bytes)
+        .map_err(|_| ApiError::unauthorized("Invalid token payload"))?;
+
+    let secret_key = format!("profile:{}:jwt_secret", unverified.sub);
+    let secret = state
+        .credentials
+        .get_secret(&secret_key)
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::unauthorized("Invalid token signature"))?;
+
+    let to_sign = format!("{}.{}", parts[0], parts[1]);
+    let expected_sig = hmac_sha256(secret.as_bytes(), to_sign.as_bytes());
+    let actual_sig = base64url_decode(parts[2])?;
+    if actual_sig.as_slice() != expected_sig {
+        return Err(ApiError::unauthorized("Invalid token signature"));
+    }
+    let now = chrono::Utc::now().timestamp();
+    if unverified.exp < now {
+        return Err(ApiError::unauthorized("Token expired"));
+    }
+    Ok(unverified)
+}
+
 #[derive(Debug, Clone)]
 pub struct AuthenticatedUser(pub LocalSessionClaims);
 
 impl<S> FromRequestParts<S> for AuthenticatedUser
 where
+    crate::server::state::AppState: axum::extract::FromRef<S>,
     S: Send + Sync,
 {
     type Rejection = ApiError;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let app_state = crate::server::state::AppState::from_ref(state);
         let auth_header = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)
@@ -159,7 +192,7 @@ where
             .filter(|s| !s.is_empty())
             .ok_or_else(|| ApiError::unauthorized("Invalid authorization header format"))?;
 
-        let claims = verify_token(token, DEFAULT_JWT_SECRET)?;
+        let claims = verify_token_with_state(token, &app_state)?;
         Ok(AuthenticatedUser(claims))
     }
 }

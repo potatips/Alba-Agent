@@ -99,6 +99,9 @@ pub fn run() {
 
             let server_state =
                 nexus_albaai::server::state::AppState::new(store.clone(), workspace_root.clone())
+                    .with_credentials(Arc::new(
+                        nexus_albaai::credentials::MacosKeychainStore::new("alba"),
+                    ))
                     .with_static_dir(static_dir);
 
             let bind_addr = std::env::var("ALBA_BIND_PORT")

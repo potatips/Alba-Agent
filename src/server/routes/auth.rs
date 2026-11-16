@@ -53,8 +53,9 @@ pub async fn local_session_handler(
     };
     let expires_in: i64 = 86400;
     let exp = Utc::now().timestamp() + expires_in;
+    let profile_id = req.sub.unwrap_or_else(|| DEFAULT_LOCAL_USER_ID.to_string());
     let claims = LocalSessionClaims {
-        sub: req.sub.unwrap_or_else(|| DEFAULT_LOCAL_USER_ID.to_string()),
+        sub: profile_id.clone(),
         tenant_id: DEFAULT_LOCAL_TENANT_ID.to_string(),
         workspace_id: DEFAULT_LOCAL_WORKSPACE_ID.to_string(),
         email: req
@@ -68,7 +69,8 @@ pub async fn local_session_handler(
         plan: DEFAULT_LOCAL_USER_PLAN.to_string(),
         exp,
     };
-    let access_token = sign_token(&claims, &state.jwt_secret)?;
+    let secret = state.get_or_create_jwt_secret(&profile_id)?;
+    let access_token = sign_token(&claims, &secret)?;
     Ok(Json(LocalSessionResponse {
         access_token,
         tenant_id: claims.tenant_id,

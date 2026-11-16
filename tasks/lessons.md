@@ -114,3 +114,14 @@ The Docker provider hid this with a separate /tmp tmpfs. Anything that replaces 
 - A measurement must name exactly what was measured; a proxy is never labeled 'measured' for the real system.
 - API contract audit: Re-auditing requires checking both string literals and template literals (`${...}`) to identify all parameterized paths and their exact caller file:line.
 - Commit hygiene: When migrating a core into a new repository, separate the unchanged core import from feature additions and review fixes so reviewers can inspect clean diffs.
+- A completion report must quote numbers from the command output, never recompute them by hand.
+
+## Persistent Memory and Conversation Compaction (Phase G5)
+- **Conversation Compaction and Atomic Tool Families**: An LLM conversation history containing tool calls cannot be sliced at arbitrary message indices. In OpenAI/Anthropic/generic chat format, an assistant message containing `tool_calls` must be immediately followed by matching `Tool` role messages containing the responses. Truncating or summarizing in the middle of a tool family causes provider APIs to reject the request as invalid. Grouping messages into atomic units (`MessageGroup`) before compaction guarantees tool-call integrity across all history limits.
+- **SQLite Schema Initialization in Multi-Threaded Tests**: When running tests that test raw transaction rollbacks or aborts directly against SQLite, ensure the schema is initialized through `SqliteCheckpointStore::new` first so all migration tables exist before executing raw SQL statements.
+- **Fail-Closed Verification Contract in Test Fixtures**: In workflow engines with strict evidence checks, `mark_run_verified` explicitly refuses to verify any run with zero artifact records (`forged exit-0 evidence row without artifact records`). Any test fixture that simulates or expects a verified run must declare and produce at least one real artifact file and have an associated run record.
+
+## Desktop Packaging and Release Baseline (Phase G6)
+- **Deterministic Test Portability**: A test must not depend on a binary or env var the caller must prepare; cargo test on a clean checkout must pass. Integration tests exercising packaged workspace binaries must build the target package deterministically if the binary does not already exist in the target directory.
+- **Process Lifecycle and State Restoration**: When spawning desktop application bundles in automated end-to-end tests after SIGKILL crash simulations, pass `-ApplePersistenceIgnoreState YES` on macOS to bypass AppKit's unattended state restoration dialogs that otherwise trap and time out headless test harnesses.
+- **Metric Provenance and Comparison Validity**: A measurement names exactly what was measured; a proxy is never labeled 'measured' for the real system. The 0.23s sample workflow execution under a deterministic mock model cannot be claimed as a speedup over the 27.22s baseline that evaluated a cloud LLM.

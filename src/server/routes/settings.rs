@@ -104,10 +104,28 @@ pub async fn get_provider_presets_handler() -> Result<Json<Value>, ApiError> {
                     "local": false
                 },
                 {
+                    "id": "local",
+                    "name": "Local LLM",
+                    "category": "direct",
+                    "description": "Local OpenAI-compatible server (Ollama, LM Studio, llama.cpp on loopback)",
+                    "protocol": "openai",
+                    "base_url": "http://127.0.0.1:11434/v1",
+                    "models": [
+                        { "id": "default", "kind": "chat", "prompt_usd_per_million": null, "completion_usd_per_million": null }
+                    ],
+                    "models_note": "Gợi ý model, có thể sửa đổi hoặc lấy từ endpoint danh sách model của provider",
+                    "auth_fields": [
+                        { "name": "base_url", "label": "Base URL", "required": true, "secret": false, "placeholder": "http://127.0.0.1:11434/v1" },
+                        { "name": "api_key", "label": "API Key", "required": false, "secret": true, "placeholder": "Optional for local" }
+                    ],
+                    "icon": "server",
+                    "local": true
+                },
+                {
                     "id": "custom_openai",
                     "name": "Custom OpenAI-compatible",
                     "category": "direct",
-                    "description": "Local or private OpenAI-compatible server (vLLM, Ollama, LM Studio)",
+                    "description": "Private or external OpenAI-compatible server (vLLM, gateway)",
                     "protocol": "openai",
                     "base_url": "",
                     "models": [
@@ -115,11 +133,11 @@ pub async fn get_provider_presets_handler() -> Result<Json<Value>, ApiError> {
                     ],
                     "models_note": "Gợi ý model, có thể sửa đổi hoặc lấy từ endpoint danh sách model của provider",
                     "auth_fields": [
-                        { "name": "base_url", "label": "Base URL", "required": true, "secret": false, "placeholder": "http://127.0.0.1:8000/v1 or https://..." },
+                        { "name": "base_url", "label": "Base URL", "required": true, "secret": false, "placeholder": "https://api.example.com/v1" },
                         { "name": "api_key", "label": "API Key", "required": false, "secret": true, "placeholder": "Optional or sk-..." }
                     ],
                     "icon": "server",
-                    "local": true
+                    "local": false
                 }
             ],
             "subscription": [],
@@ -192,6 +210,10 @@ pub async fn create_credential_handler(
 
     let secret_key = format!("account:{}:provider:{}", user.sub, conn_id);
 
+    let is_official = crate::profiles::is_official_preset(preset_id);
+    let is_local = crate::profiles::is_local_preset(preset_id);
+    let is_custom = crate::profiles::is_custom_preset(preset_id);
+
     let masked_key = match api_key {
         Some(k) => {
             state
@@ -201,7 +223,9 @@ pub async fn create_credential_handler(
             Some(mask_api_key(k))
         }
         None => {
-            if let Some(ref ext) = existing {
+            if is_local {
+                None
+            } else if let Some(ref ext) = existing {
                 ext.masked_key.clone()
             } else {
                 return Err(ApiError::bad_request("api_key is required"));
@@ -209,7 +233,7 @@ pub async fn create_credential_handler(
         }
     };
 
-    let (provider, base_url, models) = if crate::profiles::is_official_preset(preset_id) {
+    let (provider, base_url, models) = if is_official {
         if body
             .base_url
             .as_ref()
@@ -239,7 +263,16 @@ pub async fn create_credential_handler(
             _ => Vec::new(),
         };
         (p_name, Some(canonical_url), default_models)
-    } else if crate::profiles::is_custom_preset(preset_id) {
+    } else if is_local {
+        let raw_url = body
+            .base_url
+            .as_deref()
+            .unwrap_or("http://127.0.0.1:11434/v1");
+        let validated_url =
+            crate::profiles::validate_local_base_url(raw_url).map_err(ApiError::bad_request)?;
+        let default_models = vec!["default".to_string()];
+        ("openai".to_string(), Some(validated_url), default_models)
+    } else if is_custom {
         if body.confirm_custom_host != Some(true) {
             return Err(ApiError::bad_request(
                 "Custom preset requires explicit confirmation (confirm_custom_host: true)",
@@ -344,7 +377,7 @@ async fn run_provider_health_check(
             let client = GeminiClient::new(config).map_err(|e| e.to_string())?;
             client.complete(&req).await.map_err(|e| e.to_string())?;
         }
-        "openai" | "deepseek" | "custom_openai" | "custom" => {
+        "openai" | "deepseek" | "custom_openai" | "custom" | "local" | "ollama" => {
             let config = ModelConfig::new(endpoint_base_url, secret, model).with_timeout(5);
             let client = OpenAiCompatibleClient::new(config).map_err(|e| e.to_string())?;
             client.complete(&req).await.map_err(|e| e.to_string())?;
@@ -385,11 +418,23 @@ pub async fn test_credential_handler(
     .map_err(|e| ApiError::bad_request(format!("Invalid endpoint configuration: {}", e)))?;
 
     let secret_key = format!("account:{}:provider:{}", user.sub, id);
-    let secret = state
-        .credentials
-        .get_secret(&secret_key)
-        .map_err(|e| ApiError::internal(format!("Credential store error: {e}")))?
-        .ok_or_else(|| ApiError::bad_request("No secret found for this credential"))?;
+    let secret = match state.credentials.get_secret(&secret_key) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            if crate::profiles::is_local_preset(&conn.preset_id) {
+                String::new()
+            } else {
+                return Err(ApiError::bad_request("No secret found for this credential"));
+            }
+        }
+        Err(e) => {
+            if crate::profiles::is_local_preset(&conn.preset_id) {
+                String::new()
+            } else {
+                return Err(ApiError::internal(format!("Credential store error: {e}")));
+            }
+        }
+    };
 
     let test_model = conn
         .available_models

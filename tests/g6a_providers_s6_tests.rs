@@ -259,7 +259,7 @@ async fn test_credentials_lifecycle_and_zero_secret_leakage() {
         .header(ORIGIN, &base_url)
         .header(COOKIE, &cookie)
         .json(&json!({
-            "preset_id": "custom_openai",
+            "preset_id": "local",
             "api_key": raw_secret,
             "base_url": mock_llm_url,
             "confirm_custom_host": true,
@@ -275,7 +275,7 @@ async fn test_credentials_lifecycle_and_zero_secret_leakage() {
 
     let created: Value = serde_json::from_str(&create_body_text).unwrap();
     let cred_id = created["id"].as_str().unwrap().to_string();
-    assert_eq!(created["preset_id"], "custom_openai");
+    assert_eq!(created["preset_id"], "local");
     assert_eq!(created["provider"], "openai");
     assert_eq!(created["status"], "CONNECTED");
     let masked = created["masked_key"].as_str().unwrap();
@@ -392,7 +392,7 @@ async fn test_multi_account_credential_isolation() {
         .header(ORIGIN, &base_url)
         .header(COOKIE, &cookie_a)
         .json(&json!({
-            "preset_id": "custom_openai",
+            "preset_id": "local",
             "api_key": secret_a,
             "base_url": mock_llm_url,
             "confirm_custom_host": true,
@@ -505,7 +505,7 @@ async fn test_sign_out_purges_provider_secrets() {
         .header(ORIGIN, &base_url)
         .header(COOKIE, &cookie)
         .json(&json!({
-            "preset_id": "custom_openai",
+            "preset_id": "local",
             "api_key": secret,
             "base_url": mock_llm_url,
             "confirm_custom_host": true,

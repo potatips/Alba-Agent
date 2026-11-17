@@ -272,29 +272,33 @@ impl ModelClient for ServerModelClient {
             let api_key = match secret_opt {
                 Some(key) if !key.trim().is_empty() => key,
                 _ => {
-                    let err = ModelError::AuthenticationError(format!(
-                        "credential missing or revoked for provider {}",
-                        selected_conn.id
-                    ));
-                    if let Some(scope) = self.scope {
-                        let entry = AuditLogEntry {
-                            id: Uuid::new_v4(),
-                            scope,
-                            actor_id: Some(sub.clone()),
-                            action: "model.completion_failed".to_string(),
-                            target_id: Uuid::parse_str(&selected_conn.id).ok(),
-                            details: serde_json::json!({
-                                "provider_id": selected_conn.id,
-                                "preset_id": selected_conn.preset_id,
-                                "error": "credential missing or revoked",
-                            }),
-                            created_at: Utc::now(),
-                        };
-                        if let Err(e) = store.record_audit_log(&entry).await {
-                            eprintln!("Failed to record audit log: {}", e);
+                    if crate::profiles::is_local_preset(&selected_conn.preset_id) {
+                        "local-no-key".to_string()
+                    } else {
+                        let err = ModelError::AuthenticationError(format!(
+                            "credential missing or revoked for provider {}",
+                            selected_conn.id
+                        ));
+                        if let Some(scope) = self.scope {
+                            let entry = AuditLogEntry {
+                                id: Uuid::new_v4(),
+                                scope,
+                                actor_id: Some(sub.clone()),
+                                action: "model.completion_failed".to_string(),
+                                target_id: Uuid::parse_str(&selected_conn.id).ok(),
+                                details: serde_json::json!({
+                                    "provider_id": selected_conn.id,
+                                    "preset_id": selected_conn.preset_id,
+                                    "error": "credential missing or revoked",
+                                }),
+                                created_at: Utc::now(),
+                            };
+                            if let Err(e) = store.record_audit_log(&entry).await {
+                                eprintln!("Failed to record audit log: {}", e);
+                            }
                         }
+                        return Err(err);
                     }
-                    return Err(err);
                 }
             };
 
@@ -326,7 +330,7 @@ impl ModelClient for ServerModelClient {
                     ))?;
                     client.complete(&req).await
                 }
-                "openai" | "custom_openai" | "custom" => {
+                "openai" | "custom_openai" | "custom" | "local" | "ollama" => {
                     let client = OpenAiCompatibleClient::new(ModelConfig::new(
                         endpoint_base_url,
                         api_key,

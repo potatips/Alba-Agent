@@ -92,6 +92,10 @@ pub fn is_official_preset(preset_id: &str) -> bool {
     )
 }
 
+pub fn is_local_preset(preset_id: &str) -> bool {
+    matches!(preset_id, "local" | "ollama")
+}
+
 pub fn is_custom_preset(preset_id: &str) -> bool {
     matches!(preset_id, "custom_openai" | "custom")
 }
@@ -116,11 +120,31 @@ pub fn official_preset_host(preset_id: &str) -> Option<&'static str> {
     }
 }
 
-pub fn validate_custom_base_url(raw_url: &str) -> Result<String, String> {
+pub fn is_loopback_host(host_str: &str) -> bool {
+    if host_str == "localhost" {
+        return true;
+    }
+    if let Ok(ip) = host_str.parse::<std::net::IpAddr>() {
+        match ip {
+            std::net::IpAddr::V4(v4) => v4.is_loopback(),
+            std::net::IpAddr::V6(v6) => {
+                v6.is_loopback()
+                    || v6
+                        .to_ipv4_mapped()
+                        .map(|v4| v4.is_loopback())
+                        .unwrap_or(false)
+            }
+        }
+    } else {
+        false
+    }
+}
+
+pub fn validate_local_base_url(raw_url: &str) -> Result<String, String> {
     let parsed = url::Url::parse(raw_url).map_err(|e| format!("invalid base_url format: {}", e))?;
     let scheme = parsed.scheme();
-    if scheme != "https" && scheme != "http" {
-        return Err("base_url must use https or http".to_string());
+    if scheme != "http" && scheme != "https" {
+        return Err("local base_url must use http or https".to_string());
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err("credentials are not permitted in base_url".to_string());
@@ -129,14 +153,30 @@ pub fn validate_custom_base_url(raw_url: &str) -> Result<String, String> {
         .host_str()
         .ok_or_else(|| "base_url must include a host".to_string())?;
 
-    let is_loopback = host_str == "localhost"
-        || host_str
-            .parse::<std::net::IpAddr>()
-            .map(|ip| ip.is_loopback())
-            .unwrap_or(false);
+    if !is_loopback_host(host_str) {
+        return Err(
+            "local preset only permits loopback hosts (127.0.0.1, localhost, ::1)".to_string(),
+        );
+    }
 
-    if scheme == "http" && !is_loopback {
-        return Err("HTTP is only permitted for loopback hosts (127.0.0.1, localhost)".to_string());
+    Ok(parsed.to_string().trim_end_matches('/').to_string())
+}
+
+pub fn validate_custom_base_url(raw_url: &str) -> Result<String, String> {
+    let parsed = url::Url::parse(raw_url).map_err(|e| format!("invalid base_url format: {}", e))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("credentials are not permitted in base_url".to_string());
+    }
+    let scheme = parsed.scheme();
+    if scheme != "https" {
+        return Err("custom presets require public HTTPS endpoints; HTTP and loopback hosts are only permitted for the 'local' preset".to_string());
+    }
+    let host_str = parsed
+        .host_str()
+        .ok_or_else(|| "base_url must include a host".to_string())?;
+
+    if is_loopback_host(host_str) {
+        return Err("loopback hosts (127.0.0.1, localhost) are only permitted for the 'local' preset; custom presets require public HTTPS endpoints".to_string());
     }
 
     if let Ok(ip) = host_str.parse::<std::net::IpAddr>() {
@@ -145,11 +185,17 @@ pub fn validate_custom_base_url(raw_url: &str) -> Result<String, String> {
                 v4.is_private() || v4.is_link_local() || v4.is_unspecified()
             }
             std::net::IpAddr::V6(v6) => {
-                v6.is_unique_local() || v6.is_unicast_link_local() || v6.is_unspecified()
+                v6.is_unique_local()
+                    || v6.is_unicast_link_local()
+                    || v6.is_unspecified()
+                    || v6
+                        .to_ipv4_mapped()
+                        .map(|v4| v4.is_private() || v4.is_link_local() || v4.is_unspecified())
+                        .unwrap_or(false)
             }
         };
-        if is_private && !is_loopback {
-            return Err("private network hosts are not permitted for custom base_url; only loopback or public HTTPS are allowed".to_string());
+        if is_private {
+            return Err("private network hosts are not permitted for custom base_url; only public HTTPS endpoints are allowed".to_string());
         }
     } else if host_str.ends_with(".local")
         || host_str.ends_with(".internal")
@@ -180,6 +226,9 @@ pub fn resolve_and_verify_provider_endpoint(
             }
         }
         Ok(official_preset_base_url(preset_id).unwrap().to_string())
+    } else if is_local_preset(preset_id) {
+        let url_str = stored_base_url.unwrap_or("http://127.0.0.1:11434/v1");
+        validate_local_base_url(url_str)
     } else if is_custom_preset(preset_id) {
         let url_str =
             stored_base_url.ok_or_else(|| "custom preset requires base_url".to_string())?;

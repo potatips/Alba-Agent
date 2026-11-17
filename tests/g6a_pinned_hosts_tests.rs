@@ -422,7 +422,30 @@ async fn test_custom_preset_validation_and_host_warning() {
         .unwrap()
         .contains("internal network"));
 
-    let resp_valid = client
+    let resp_custom_loopback_rejected = client
+        .post(format!("{base_url}/api/v1/settings/credentials"))
+        .header(HOST, host_str)
+        .header(ORIGIN, &base_url)
+        .header(COOKIE, &cookie)
+        .json(&json!({
+            "preset_id": "custom_openai",
+            "api_key": "sk-custom-12345",
+            "base_url": "https://127.0.0.1:11434/v1",
+            "confirm_custom_host": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp_custom_loopback_rejected.status(),
+        StatusCode::BAD_REQUEST
+    );
+    let body: Value = resp_custom_loopback_rejected.json().await.unwrap();
+    assert!(body["detail"].as_str().unwrap().contains(
+        "loopback hosts (127.0.0.1, localhost) are only permitted for the 'local' preset"
+    ));
+
+    let resp_valid_custom = client
         .post(format!("{base_url}/api/v1/settings/credentials"))
         .header(HOST, host_str)
         .header(ORIGIN, &base_url)
@@ -430,17 +453,96 @@ async fn test_custom_preset_validation_and_host_warning() {
         .json(&json!({
             "preset_id": "custom_openai",
             "api_key": "sk-custom-valid-key-12345",
-            "base_url": "http://127.0.0.1:11434/v1",
+            "base_url": "https://api.custom-gateway.example/v1",
             "confirm_custom_host": true
         }))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp_valid.status(), StatusCode::OK);
-    let body: Value = resp_valid.json().await.unwrap();
+    assert_eq!(resp_valid_custom.status(), StatusCode::OK);
+    let body: Value = resp_valid_custom.json().await.unwrap();
     assert_eq!(body["preset_id"], "custom_openai");
     let warning = body["warning"].as_str().unwrap();
-    assert_eq!(warning, "khóa API sẽ được gửi tới 127.0.0.1");
+    assert_eq!(
+        warning,
+        "khóa API sẽ được gửi tới api.custom-gateway.example"
+    );
+}
+
+#[tokio::test]
+async fn test_local_preset_allows_loopback_without_api_key_and_rejects_external() {
+    let (base_url, _state, cookie) = setup_test_server(
+        "sub-local-preset",
+        "00000000-0000-0000-0000-000000000001",
+        "00000000-0000-0000-0000-000000000002",
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let host_str = base_url.strip_prefix("http://").unwrap();
+
+    let resp_local_ip = client
+        .post(format!("{base_url}/api/v1/settings/credentials"))
+        .header(HOST, host_str)
+        .header(ORIGIN, &base_url)
+        .header(COOKIE, &cookie)
+        .json(&json!({
+            "preset_id": "local",
+            "base_url": "http://127.0.0.1:11434/v1"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_local_ip.status(), StatusCode::OK);
+    let body: Value = resp_local_ip.json().await.unwrap();
+    assert_eq!(body["preset_id"], "local");
+    assert_eq!(body["masked_key"], Value::Null);
+    assert_eq!(body["warning"], Value::Null);
+
+    let resp_local_named = client
+        .post(format!("{base_url}/api/v1/settings/credentials"))
+        .header(HOST, host_str)
+        .header(ORIGIN, &base_url)
+        .header(COOKIE, &cookie)
+        .json(&json!({
+            "preset_id": "local",
+            "base_url": "http://localhost:1234/v1"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_local_named.status(), StatusCode::OK);
+
+    let resp_local_default_url = client
+        .post(format!("{base_url}/api/v1/settings/credentials"))
+        .header(HOST, host_str)
+        .header(ORIGIN, &base_url)
+        .header(COOKIE, &cookie)
+        .json(&json!({
+            "preset_id": "local"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_local_default_url.status(), StatusCode::OK);
+
+    let resp_local_external = client
+        .post(format!("{base_url}/api/v1/settings/credentials"))
+        .header(HOST, host_str)
+        .header(ORIGIN, &base_url)
+        .header(COOKIE, &cookie)
+        .json(&json!({
+            "preset_id": "local",
+            "base_url": "https://api.external.com/v1"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_local_external.status(), StatusCode::BAD_REQUEST);
+    let body: Value = resp_local_external.json().await.unwrap();
+    assert!(body["detail"]
+        .as_str()
+        .unwrap()
+        .contains("local preset only permits loopback hosts"));
 }
 
 #[tokio::test]

@@ -24,6 +24,7 @@ pub struct CreateCredentialRequest {
     pub default_models: Option<Value>,
     pub settings: Option<Value>,
     pub secrets: Option<HashMap<String, String>>,
+    pub confirm_custom_host: Option<bool>,
 }
 
 pub async fn get_provider_presets_handler() -> Result<Json<Value>, ApiError> {
@@ -41,6 +42,7 @@ pub async fn get_provider_presets_handler() -> Result<Json<Value>, ApiError> {
                         { "id": "gpt-4o", "kind": "chat", "prompt_usd_per_million": "2.5", "completion_usd_per_million": "10.0" },
                         { "id": "gpt-4o-mini", "kind": "chat", "prompt_usd_per_million": "0.15", "completion_usd_per_million": "0.6" }
                     ],
+                    "models_note": "Gợi ý model, có thể sửa đổi hoặc lấy từ endpoint danh sách model của provider",
                     "auth_fields": [
                         { "name": "api_key", "label": "API Key", "required": true, "secret": true, "placeholder": "sk-..." }
                     ],
@@ -58,6 +60,7 @@ pub async fn get_provider_presets_handler() -> Result<Json<Value>, ApiError> {
                         { "id": "claude-3-7-sonnet", "kind": "chat", "prompt_usd_per_million": "3.0", "completion_usd_per_million": "15.0" },
                         { "id": "claude-3-5-haiku", "kind": "chat", "prompt_usd_per_million": "0.8", "completion_usd_per_million": "4.0" }
                     ],
+                    "models_note": "Gợi ý model, có thể sửa đổi hoặc lấy từ endpoint danh sách model của provider",
                     "auth_fields": [
                         { "name": "api_key", "label": "API Key", "required": true, "secret": true, "placeholder": "sk-ant-..." }
                     ],
@@ -68,13 +71,14 @@ pub async fn get_provider_presets_handler() -> Result<Json<Value>, ApiError> {
                     "id": "google_gemini",
                     "name": "Google Gemini",
                     "category": "direct",
-                    "description": "Gemini 3.8 Flash, Gemini 1.5 Pro",
+                    "description": "Gemini 1.5 Flash, Gemini 1.5 Pro",
                     "protocol": "gemini",
                     "base_url": "https://generativelanguage.googleapis.com",
                     "models": [
-                        { "id": "gemini-3.8-flash-high", "kind": "chat", "prompt_usd_per_million": "0.1", "completion_usd_per_million": "0.4" },
+                        { "id": "gemini-1.5-flash", "kind": "chat", "prompt_usd_per_million": "0.075", "completion_usd_per_million": "0.3" },
                         { "id": "gemini-1.5-pro", "kind": "chat", "prompt_usd_per_million": "1.25", "completion_usd_per_million": "5.0" }
                     ],
+                    "models_note": "Gợi ý model, có thể sửa đổi hoặc lấy từ endpoint danh sách model của provider",
                     "auth_fields": [
                         { "name": "api_key", "label": "API Key", "required": true, "secret": true, "placeholder": "AIza..." }
                     ],
@@ -92,11 +96,30 @@ pub async fn get_provider_presets_handler() -> Result<Json<Value>, ApiError> {
                         { "id": "deepseek-chat", "kind": "chat", "prompt_usd_per_million": "0.14", "completion_usd_per_million": "0.28" },
                         { "id": "deepseek-reasoner", "kind": "chat", "prompt_usd_per_million": "0.55", "completion_usd_per_million": "2.19" }
                     ],
+                    "models_note": "Gợi ý model, có thể sửa đổi hoặc lấy từ endpoint danh sách model của provider",
                     "auth_fields": [
                         { "name": "api_key", "label": "API Key", "required": true, "secret": true, "placeholder": "sk-..." }
                     ],
                     "icon": "deepseek",
                     "local": false
+                },
+                {
+                    "id": "custom_openai",
+                    "name": "Custom OpenAI-compatible",
+                    "category": "direct",
+                    "description": "Local or private OpenAI-compatible server (vLLM, Ollama, LM Studio)",
+                    "protocol": "openai",
+                    "base_url": "",
+                    "models": [
+                        { "id": "default", "kind": "chat", "prompt_usd_per_million": null, "completion_usd_per_million": null }
+                    ],
+                    "models_note": "Gợi ý model, có thể sửa đổi hoặc lấy từ endpoint danh sách model của provider",
+                    "auth_fields": [
+                        { "name": "base_url", "label": "Base URL", "required": true, "secret": false, "placeholder": "http://127.0.0.1:8000/v1 or https://..." },
+                        { "name": "api_key", "label": "API Key", "required": false, "secret": true, "placeholder": "Optional or sk-..." }
+                    ],
+                    "icon": "server",
+                    "local": true
                 }
             ],
             "subscription": [],
@@ -131,6 +154,13 @@ pub async fn create_credential_handler(
     AppJson(body): AppJson<CreateCredentialRequest>,
 ) -> Result<Json<CredentialResponse>, ApiError> {
     let user = auth.0;
+    let audit_tenant = uuid::Uuid::parse_str(&user.tenant_id).map_err(|e| {
+        ApiError::bad_request(format!("invalid tenant_id in session claims: {}", e))
+    })?;
+    let audit_workspace = uuid::Uuid::parse_str(&user.workspace_id).map_err(|e| {
+        ApiError::bad_request(format!("invalid workspace_id in session claims: {}", e))
+    })?;
+
     let preset_id = body.preset_id.trim();
     if preset_id.is_empty() {
         return Err(ApiError::bad_request("preset_id cannot be empty"));
@@ -179,40 +209,58 @@ pub async fn create_credential_handler(
         }
     };
 
-    let (provider, base_url_default, models) = match preset_id {
-        "openai" => (
-            "openai".to_string(),
-            Some("https://api.openai.com/v1".to_string()),
-            vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()],
-        ),
-        "anthropic" => (
-            "anthropic".to_string(),
-            Some("https://api.anthropic.com/v1".to_string()),
-            vec![
+    let (provider, base_url, models) = if crate::profiles::is_official_preset(preset_id) {
+        if body
+            .base_url
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+        {
+            return Err(ApiError::bad_request(format!(
+                "Custom base_url is not permitted for official preset '{}'",
+                preset_id
+            )));
+        }
+        let p_name = match preset_id {
+            "google_gemini" => "gemini".to_string(),
+            other => other.to_string(),
+        };
+        let canonical_url = crate::profiles::official_preset_base_url(preset_id)
+            .unwrap()
+            .to_string();
+        let default_models = match preset_id {
+            "openai" => vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()],
+            "anthropic" => vec![
                 "claude-3-7-sonnet".to_string(),
                 "claude-3-5-haiku".to_string(),
             ],
-        ),
-        "google_gemini" => (
-            "gemini".to_string(),
-            Some("https://generativelanguage.googleapis.com".to_string()),
-            vec![
-                "gemini-3.8-flash-high".to_string(),
-                "gemini-1.5-pro".to_string(),
-            ],
-        ),
-        "deepseek" => (
-            "deepseek".to_string(),
-            Some("https://api.deepseek.com/v1".to_string()),
-            vec!["deepseek-chat".to_string(), "deepseek-reasoner".to_string()],
-        ),
-        other => (other.to_string(), body.base_url.clone(), Vec::new()),
+            "google_gemini" => vec!["gemini-1.5-flash".to_string(), "gemini-1.5-pro".to_string()],
+            "deepseek" => vec!["deepseek-chat".to_string(), "deepseek-reasoner".to_string()],
+            _ => Vec::new(),
+        };
+        (p_name, Some(canonical_url), default_models)
+    } else if crate::profiles::is_custom_preset(preset_id) {
+        if body.confirm_custom_host != Some(true) {
+            return Err(ApiError::bad_request(
+                "Custom preset requires explicit confirmation (confirm_custom_host: true)",
+            ));
+        }
+        let raw_url = body
+            .base_url
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| ApiError::bad_request("Custom preset requires base_url"))?;
+        let validated_url =
+            crate::profiles::validate_custom_base_url(raw_url).map_err(ApiError::bad_request)?;
+        let default_models = vec!["default".to_string()];
+        ("openai".to_string(), Some(validated_url), default_models)
+    } else {
+        return Err(ApiError::bad_request(format!(
+            "Unknown or unsupported provider preset: {}",
+            preset_id
+        )));
     };
 
-    let base_url = body
-        .base_url
-        .filter(|s| !s.trim().is_empty())
-        .or(base_url_default);
     let now = chrono::Utc::now().timestamp();
 
     let conn = ProviderConnection {
@@ -239,19 +287,9 @@ pub async fn create_credential_handler(
         .create_or_update_provider_connection(&conn)
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    let audit_tenant = uuid::Uuid::parse_str(&user.tenant_id).unwrap_or_else(|_| {
-        uuid::Uuid::parse_str(crate::server::auth::DEFAULT_LOCAL_TENANT_ID).unwrap()
-    });
-    let audit_workspace = uuid::Uuid::parse_str(&user.workspace_id).unwrap_or_else(|_| {
-        uuid::Uuid::parse_str(crate::server::auth::DEFAULT_LOCAL_WORKSPACE_ID).unwrap()
-    });
     let audit_scope =
         crate::domain::ExecutionScope::new(audit_tenant, audit_workspace, uuid::Uuid::new_v4())
-            .unwrap_or_else(|_| crate::domain::ExecutionScope {
-                tenant_id: audit_tenant,
-                workspace_id: audit_workspace,
-                run_id: uuid::Uuid::new_v4(),
-            });
+            .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let entry = crate::checkpoints::types::AuditLogEntry {
         id: uuid::Uuid::new_v4(),
@@ -277,8 +315,8 @@ pub async fn create_credential_handler(
 }
 
 async fn run_provider_health_check(
-    provider: &str,
-    base_url: Option<&str>,
+    preset_id: &str,
+    endpoint_base_url: &str,
     secret: &str,
     model: &str,
 ) -> Result<(), String> {
@@ -295,24 +333,24 @@ async fn run_provider_health_check(
         model_override: None,
     };
 
-    match provider {
+    match preset_id {
         "anthropic" => {
-            let base = base_url.unwrap_or("https://api.anthropic.com/v1");
-            let config = ModelConfig::new(base, secret, model).with_timeout(5);
+            let config = ModelConfig::new(endpoint_base_url, secret, model).with_timeout(5);
             let client = AnthropicClient::new(config).map_err(|e| e.to_string())?;
             client.complete(&req).await.map_err(|e| e.to_string())?;
         }
-        "gemini" => {
-            let base = base_url.unwrap_or("https://generativelanguage.googleapis.com");
-            let config = ModelConfig::new(base, secret, model).with_timeout(5);
+        "google_gemini" => {
+            let config = ModelConfig::new(endpoint_base_url, secret, model).with_timeout(5);
             let client = GeminiClient::new(config).map_err(|e| e.to_string())?;
             client.complete(&req).await.map_err(|e| e.to_string())?;
         }
-        _ => {
-            let base = base_url.unwrap_or("https://api.openai.com/v1");
-            let config = ModelConfig::new(base, secret, model).with_timeout(5);
+        "openai" | "deepseek" | "custom_openai" | "custom" => {
+            let config = ModelConfig::new(endpoint_base_url, secret, model).with_timeout(5);
             let client = OpenAiCompatibleClient::new(config).map_err(|e| e.to_string())?;
             client.complete(&req).await.map_err(|e| e.to_string())?;
+        }
+        unknown => {
+            return Err(format!("unknown provider preset: {}", unknown));
         }
     }
     Ok(())
@@ -324,6 +362,12 @@ pub async fn test_credential_handler(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let user = auth.0;
+    let audit_tenant = uuid::Uuid::parse_str(&user.tenant_id).map_err(|e| {
+        ApiError::bad_request(format!("invalid tenant_id in session claims: {}", e))
+    })?;
+    let audit_workspace = uuid::Uuid::parse_str(&user.workspace_id).map_err(|e| {
+        ApiError::bad_request(format!("invalid workspace_id in session claims: {}", e))
+    })?;
     let conn = state
         .store
         .get_provider_connection_by_id(&id)
@@ -333,6 +377,12 @@ pub async fn test_credential_handler(
     if conn.profile_id != user.sub {
         return Err(ApiError::not_found("Credential not found"));
     }
+
+    let resolved_base_url = crate::profiles::resolve_and_verify_provider_endpoint(
+        &conn.preset_id,
+        conn.base_url.as_deref(),
+    )
+    .map_err(|e| ApiError::bad_request(format!("Invalid endpoint configuration: {}", e)))?;
 
     let secret_key = format!("account:{}:provider:{}", user.sub, id);
     let secret = state
@@ -348,13 +398,8 @@ pub async fn test_credential_handler(
         .unwrap_or("default");
 
     let start = std::time::Instant::now();
-    let test_res = run_provider_health_check(
-        &conn.provider,
-        conn.base_url.as_deref(),
-        &secret,
-        test_model,
-    )
-    .await;
+    let test_res =
+        run_provider_health_check(&conn.preset_id, &resolved_base_url, &secret, test_model).await;
     let latency_ms = start.elapsed().as_millis() as u64;
 
     let (status, safe_error) = match test_res {
@@ -371,19 +416,9 @@ pub async fn test_credential_handler(
         .create_or_update_provider_connection(&updated_conn)
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    let audit_tenant = uuid::Uuid::parse_str(&user.tenant_id).unwrap_or_else(|_| {
-        uuid::Uuid::parse_str(crate::server::auth::DEFAULT_LOCAL_TENANT_ID).unwrap()
-    });
-    let audit_workspace = uuid::Uuid::parse_str(&user.workspace_id).unwrap_or_else(|_| {
-        uuid::Uuid::parse_str(crate::server::auth::DEFAULT_LOCAL_WORKSPACE_ID).unwrap()
-    });
     let audit_scope =
         crate::domain::ExecutionScope::new(audit_tenant, audit_workspace, uuid::Uuid::new_v4())
-            .unwrap_or_else(|_| crate::domain::ExecutionScope {
-                tenant_id: audit_tenant,
-                workspace_id: audit_workspace,
-                run_id: uuid::Uuid::new_v4(),
-            });
+            .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let entry = crate::checkpoints::types::AuditLogEntry {
         id: uuid::Uuid::new_v4(),
@@ -421,6 +456,12 @@ pub async fn delete_credential_handler(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let user = auth.0;
+    let audit_tenant = uuid::Uuid::parse_str(&user.tenant_id).map_err(|e| {
+        ApiError::bad_request(format!("invalid tenant_id in session claims: {}", e))
+    })?;
+    let audit_workspace = uuid::Uuid::parse_str(&user.workspace_id).map_err(|e| {
+        ApiError::bad_request(format!("invalid workspace_id in session claims: {}", e))
+    })?;
     let conn = state
         .store
         .get_provider_connection_by_id(&id)
@@ -441,19 +482,9 @@ pub async fn delete_credential_handler(
         .delete_provider_connection(&id, &user.sub)
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    let audit_tenant = uuid::Uuid::parse_str(&user.tenant_id).unwrap_or_else(|_| {
-        uuid::Uuid::parse_str(crate::server::auth::DEFAULT_LOCAL_TENANT_ID).unwrap()
-    });
-    let audit_workspace = uuid::Uuid::parse_str(&user.workspace_id).unwrap_or_else(|_| {
-        uuid::Uuid::parse_str(crate::server::auth::DEFAULT_LOCAL_WORKSPACE_ID).unwrap()
-    });
     let audit_scope =
         crate::domain::ExecutionScope::new(audit_tenant, audit_workspace, uuid::Uuid::new_v4())
-            .unwrap_or_else(|_| crate::domain::ExecutionScope {
-                tenant_id: audit_tenant,
-                workspace_id: audit_workspace,
-                run_id: uuid::Uuid::new_v4(),
-            });
+            .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let entry = crate::checkpoints::types::AuditLogEntry {
         id: uuid::Uuid::new_v4(),

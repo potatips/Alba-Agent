@@ -69,10 +69,141 @@ pub struct CredentialResponse {
     pub settings: serde_json::Value,
     pub balance: Option<serde_json::Value>,
     pub safe_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+pub const OFFICIAL_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+pub const OFFICIAL_OPENAI_HOST: &str = "api.openai.com";
+
+pub const OFFICIAL_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/v1";
+pub const OFFICIAL_ANTHROPIC_HOST: &str = "api.anthropic.com";
+
+pub const OFFICIAL_GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com";
+pub const OFFICIAL_GEMINI_HOST: &str = "generativelanguage.googleapis.com";
+
+pub const OFFICIAL_DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/v1";
+pub const OFFICIAL_DEEPSEEK_HOST: &str = "api.deepseek.com";
+
+pub fn is_official_preset(preset_id: &str) -> bool {
+    matches!(
+        preset_id,
+        "openai" | "anthropic" | "google_gemini" | "deepseek"
+    )
+}
+
+pub fn is_custom_preset(preset_id: &str) -> bool {
+    matches!(preset_id, "custom_openai" | "custom")
+}
+
+pub fn official_preset_base_url(preset_id: &str) -> Option<&'static str> {
+    match preset_id {
+        "openai" => Some(OFFICIAL_OPENAI_BASE_URL),
+        "anthropic" => Some(OFFICIAL_ANTHROPIC_BASE_URL),
+        "google_gemini" => Some(OFFICIAL_GEMINI_BASE_URL),
+        "deepseek" => Some(OFFICIAL_DEEPSEEK_BASE_URL),
+        _ => None,
+    }
+}
+
+pub fn official_preset_host(preset_id: &str) -> Option<&'static str> {
+    match preset_id {
+        "openai" => Some(OFFICIAL_OPENAI_HOST),
+        "anthropic" => Some(OFFICIAL_ANTHROPIC_HOST),
+        "google_gemini" => Some(OFFICIAL_GEMINI_HOST),
+        "deepseek" => Some(OFFICIAL_DEEPSEEK_HOST),
+        _ => None,
+    }
+}
+
+pub fn validate_custom_base_url(raw_url: &str) -> Result<String, String> {
+    let parsed = url::Url::parse(raw_url).map_err(|e| format!("invalid base_url format: {}", e))?;
+    let scheme = parsed.scheme();
+    if scheme != "https" && scheme != "http" {
+        return Err("base_url must use https or http".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("credentials are not permitted in base_url".to_string());
+    }
+    let host_str = parsed
+        .host_str()
+        .ok_or_else(|| "base_url must include a host".to_string())?;
+
+    let is_loopback = host_str == "localhost"
+        || host_str
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false);
+
+    if scheme == "http" && !is_loopback {
+        return Err("HTTP is only permitted for loopback hosts (127.0.0.1, localhost)".to_string());
+    }
+
+    if let Ok(ip) = host_str.parse::<std::net::IpAddr>() {
+        let is_private = match ip {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+            }
+            std::net::IpAddr::V6(v6) => {
+                v6.is_unique_local() || v6.is_unicast_link_local() || v6.is_unspecified()
+            }
+        };
+        if is_private && !is_loopback {
+            return Err("private network hosts are not permitted for custom base_url; only loopback or public HTTPS are allowed".to_string());
+        }
+    } else if host_str.ends_with(".local")
+        || host_str.ends_with(".internal")
+        || host_str.ends_with(".lan")
+    {
+        return Err("internal network domains are not permitted".to_string());
+    }
+
+    Ok(parsed.to_string().trim_end_matches('/').to_string())
+}
+
+pub fn resolve_and_verify_provider_endpoint(
+    preset_id: &str,
+    stored_base_url: Option<&str>,
+) -> Result<String, String> {
+    if is_official_preset(preset_id) {
+        if let Some(stored) = stored_base_url {
+            let parsed =
+                url::Url::parse(stored).map_err(|e| format!("stored base_url corrupted: {}", e))?;
+            let expected_host = official_preset_host(preset_id).unwrap();
+            if parsed.host_str() != Some(expected_host) {
+                return Err(format!(
+                    "host mismatch for official preset '{}': expected '{}', got '{:?}'",
+                    preset_id,
+                    expected_host,
+                    parsed.host_str()
+                ));
+            }
+        }
+        Ok(official_preset_base_url(preset_id).unwrap().to_string())
+    } else if is_custom_preset(preset_id) {
+        let url_str =
+            stored_base_url.ok_or_else(|| "custom preset requires base_url".to_string())?;
+        validate_custom_base_url(url_str)
+    } else {
+        Err(format!(
+            "unknown or unsupported provider preset: {}",
+            preset_id
+        ))
+    }
 }
 
 impl ProviderConnection {
     pub fn to_credential_response(&self) -> CredentialResponse {
+        let warning = if is_custom_preset(&self.preset_id) {
+            self.base_url.as_ref().and_then(|u| {
+                url::Url::parse(u).ok().and_then(|p| {
+                    p.host_str()
+                        .map(|h| format!("khóa API sẽ được gửi tới {}", h))
+                })
+            })
+        } else {
+            None
+        };
         CredentialResponse {
             id: self.id.clone(),
             preset_id: self.preset_id.clone(),
@@ -86,6 +217,7 @@ impl ProviderConnection {
             settings: self.settings.clone(),
             balance: None,
             safe_error: self.safe_error.clone(),
+            warning,
         }
     }
 }

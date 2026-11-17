@@ -113,6 +113,7 @@ impl OpenAiCompatibleClient {
     pub fn new(config: ModelConfig) -> Result<Self, ModelError> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.timeout_seconds))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| ModelError::NetworkError(e.to_string()))?;
         Ok(Self { client, config })
@@ -393,6 +394,7 @@ impl AnthropicClient {
     pub fn new(config: ModelConfig) -> Result<Self, ModelError> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.timeout_seconds))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| ModelError::NetworkError(e.to_string()))?;
         Ok(Self { client, config })
@@ -719,6 +721,7 @@ impl GeminiClient {
     pub fn new(config: ModelConfig) -> Result<Self, ModelError> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.timeout_seconds))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| ModelError::NetworkError(e.to_string()))?;
         Ok(Self { client, config })

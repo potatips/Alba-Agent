@@ -749,7 +749,7 @@ The frontend is the unmodified `NexusAgent/apps/web` (Next.js 15, Tailwind v3).
   ```
 
 ### 25. `GET /api/v1/settings/provider-presets`
-- **Purpose**: Returns preset definitions and schema for supported direct LLM providers (OpenAI, Anthropic, Gemini, DeepSeek).
+- **Purpose**: Returns preset definitions and schema for supported direct LLM providers (OpenAI, Anthropic, Gemini, DeepSeek) and custom local/OpenAI-compatible presets. Model lists are editable suggestions (e.g., `gemini-1.5-flash`, `gemini-1.5-pro`).
 - **Headers**: Optional authentication
 - **Response**: `200 OK`
   ```json
@@ -769,12 +769,13 @@ The frontend is the unmodified `NexusAgent/apps/web` (Next.js 15, Tailwind v3).
           "local": false
         }
       ]
-    }
+    },
+    "models_note": "Model lists are suggestions and may be dynamically edited or fetched from providers."
   }
   ```
 
 ### 26. `GET /api/v1/settings/credentials`
-- **Purpose**: Lists all provider connections belonging to the authenticated Google account (`sub`). Raw secrets are NEVER returned; only `masked_key` is exposed.
+- **Purpose**: Lists all provider connections belonging to the authenticated Google account (`sub`). Raw secrets are NEVER returned; only `masked_key` is exposed. For custom presets, `warning` displays destination host.
 - **Headers**: `Cookie: session_id=<session_id>` or `Authorization: Bearer <token>`
 - **Response**: `200 OK`
   ```json
@@ -791,7 +792,8 @@ The frontend is the unmodified `NexusAgent/apps/web` (Next.js 15, Tailwind v3).
       "default_models": {},
       "settings": {},
       "balance": null,
-      "safe_error": null
+      "safe_error": null,
+      "warning": null
     }
   ]
   ```
@@ -799,20 +801,35 @@ The frontend is the unmodified `NexusAgent/apps/web` (Next.js 15, Tailwind v3).
   - `401 Unauthorized`: When unauthenticated.
 
 ### 27. `POST /api/v1/settings/credentials`
-- **Purpose**: Creates or updates a provider connection scoped to the authenticated Google account (`sub`). The API key is stored strictly in Keychain under `account:{sub}:provider:{id}` and NEVER stored in SQLite.
+- **Purpose**: Creates or updates a provider connection scoped to the authenticated Google account (`sub`).
+  - For official presets (`openai`, `anthropic`, `google_gemini`, `deepseek`), client-supplied `base_url` is rejected with `400 Bad Request`; hardcoded official endpoints are strictly used.
+  - For custom presets (`custom_openai`), `base_url` is required and `confirm_custom_host: true` must be explicitly provided. URL must be HTTPS or loopback HTTP (`127.0.0.1` / `localhost`). Credentials in URL and non-loopback internal domains are rejected with `400 Bad Request`.
+  - HTTP clients (`reqwest`) enforce `Policy::none()` to prevent redirect attacks leaking secrets.
+  - Connection host is re-verified at runtime against SQLite before sending secrets.
+  - Invalid `tenant_id` or `workspace_id` UUID in session claims returns `400 Bad Request`.
+  - The API key is stored strictly in Keychain under `account:{sub}:provider:{id}` and NEVER stored in SQLite.
 - **Headers**: `Cookie: session_id=<session_id>` or `Authorization: Bearer <token>`, `Content-Type: application/json`
-- **Request Body**:
+- **Request Body (Official Preset)**:
   ```json
   {
     "preset_id": "anthropic",
     "api_key": "sk-ant-api03-secret",
-    "base_url": "https://api.anthropic.com/v1",
     "is_default": true
   }
   ```
-- **Response**: `200 OK` with `CredentialResponse` (with `masked_key`, zero secret).
+- **Request Body (Custom Preset)**:
+  ```json
+  {
+    "preset_id": "custom_openai",
+    "api_key": "sk-local-secret",
+    "base_url": "http://127.0.0.1:11434/v1",
+    "confirm_custom_host": true,
+    "is_default": true
+  }
+  ```
+- **Response**: `200 OK` with `CredentialResponse` (with `masked_key`, zero secret, and optional `warning` containing destination host).
 - **Error Codes**:
-  - `400 Bad Request`: When `preset_id` or `api_key` is missing.
+  - `400 Bad Request`: When `preset_id` is missing/unknown, `base_url` supplied for official preset, `confirm_custom_host` missing for custom preset, invalid URL format/scheme/credentials, or invalid session claims UUID.
   - `401 Unauthorized`: When unauthenticated.
 
 ### 28. `POST /api/v1/settings/credentials/:id/test`

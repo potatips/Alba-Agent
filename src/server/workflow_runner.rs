@@ -235,6 +235,35 @@ impl ModelClient for ServerModelClient {
                 (conn, m)
             };
 
+            let endpoint_base_url = match crate::profiles::resolve_and_verify_provider_endpoint(
+                &selected_conn.preset_id,
+                selected_conn.base_url.as_deref(),
+            ) {
+                Ok(u) => u,
+                Err(err) => {
+                    let model_err = ModelError::ConfigurationError(err.clone());
+                    if let Some(scope) = self.scope {
+                        let entry = AuditLogEntry {
+                            id: Uuid::new_v4(),
+                            scope,
+                            actor_id: Some(sub.clone()),
+                            action: "model.completion_failed".to_string(),
+                            target_id: Uuid::parse_str(&selected_conn.id).ok(),
+                            details: serde_json::json!({
+                                "provider_id": selected_conn.id,
+                                "preset_id": selected_conn.preset_id,
+                                "error": err,
+                            }),
+                            created_at: Utc::now(),
+                        };
+                        if let Err(e) = store.record_audit_log(&entry).await {
+                            eprintln!("Failed to record audit log: {}", e);
+                        }
+                    }
+                    return Err(model_err);
+                }
+            };
+
             let secret_key = format!("account:{}:provider:{}", sub, selected_conn.id);
             let secret_opt = credentials.get_secret(&secret_key).map_err(|e| {
                 ModelError::AuthenticationError(format!("failed to read secret: {}", e))
@@ -274,52 +303,40 @@ impl ModelClient for ServerModelClient {
 
             let result = match selected_conn.preset_id.as_str() {
                 "anthropic" => {
-                    let base_url = selected_conn
-                        .base_url
-                        .clone()
-                        .unwrap_or_else(|| "https://api.anthropic.com/v1".to_string());
                     let client = AnthropicClient::new(ModelConfig::new(
-                        base_url,
+                        endpoint_base_url,
                         api_key,
                         target_model.clone(),
                     ))?;
                     client.complete(&req).await
                 }
                 "google_gemini" => {
-                    let base_url = selected_conn
-                        .base_url
-                        .clone()
-                        .unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_string());
                     let client = GeminiClient::new(ModelConfig::new(
-                        base_url,
+                        endpoint_base_url,
                         api_key,
                         target_model.clone(),
                     ))?;
                     client.complete(&req).await
                 }
                 "deepseek" => {
-                    let base_url = selected_conn
-                        .base_url
-                        .clone()
-                        .unwrap_or_else(|| "https://api.deepseek.com/v1".to_string());
                     let client = OpenAiCompatibleClient::new(ModelConfig::new(
-                        base_url,
+                        endpoint_base_url,
                         api_key,
                         target_model.clone(),
                     ))?;
                     client.complete(&req).await
                 }
-                _ => {
-                    let base_url = selected_conn
-                        .base_url
-                        .clone()
-                        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+                "openai" | "custom_openai" | "custom" => {
                     let client = OpenAiCompatibleClient::new(ModelConfig::new(
-                        base_url,
+                        endpoint_base_url,
                         api_key,
                         target_model.clone(),
                     ))?;
                     client.complete(&req).await
+                }
+                unknown => {
+                    let err = format!("unknown or unsupported provider preset: {}", unknown);
+                    return Err(ModelError::ConfigurationError(err));
                 }
             };
 

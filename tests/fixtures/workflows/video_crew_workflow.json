@@ -1,0 +1,215 @@
+{
+  "id": "e2e00000-0000-0000-0000-000000000002",
+  "tenant_id": "00000000-0000-0000-0000-000000000001",
+  "workspace_id": "00000000-0000-0000-0000-000000000002",
+  "name": "Video Multi-Camera Assembly and QC Workflow",
+  "version": 1,
+  "nodes": [
+    {
+      "kind": "start",
+      "id": "start",
+      "label": "Start Video Production",
+      "trigger_type": "manual",
+      "input_schema": {
+        "type": "object"
+      },
+      "schedule": null
+    },
+    {
+      "kind": "crew",
+      "id": "crew_direction_and_editing",
+      "label": "Director and Editor Crew",
+      "agents": [
+        {
+          "id": "director",
+          "role": "Director",
+          "goal": "Analyze script notes and camera angles to determine cut pacing",
+          "backstory": "Veteran video director specializing in multi-cam pacing",
+          "model": "gemini-1.5-flash",
+          "tool_ids": [
+            "ffprobe_info",
+            "file_read"
+          ],
+          "skill_ids": [],
+          "max_iterations": 5,
+          "temperature": 0.2,
+          "guardrails": [],
+          "knowledge_capsule_ids": [],
+          "tier": "specialist"
+        },
+        {
+          "id": "editor",
+          "role": "Editor",
+          "goal": "Compute camera audio offsets and produce Edit Decision List (EDL)",
+          "backstory": "Precision multi-cam video and editor",
+          "model": "gemini-1.5-flash",
+          "tool_ids": [
+            "ffmpeg_sync_audio",
+            "file_write"
+          ],
+          "skill_ids": [],
+          "max_iterations": 5,
+          "temperature": 0.1,
+          "guardrails": [],
+          "knowledge_capsule_ids": [],
+          "tier": "specialist"
+        }
+      ],
+      "tasks": [
+        {
+          "id": "task_direction",
+          "agent_id": "director",
+          "description": "Analyze source camera metadata and produce transition plan",
+          "expected_output": "Director camera transition plan",
+          "output_schema": "text",
+          "output_schema_json": null,
+          "context_task_ids": [],
+          "expected_artifact_paths": []
+        },
+        {
+          "id": "task_editing",
+          "agent_id": "editor",
+          "description": "Calculate audio synchronization and write edl.json",
+          "expected_output": "Synchronized Edit Decision List saved to workspace",
+          "output_schema": "text",
+          "output_schema_json": null,
+          "context_task_ids": [
+            "task_direction"
+          ],
+          "expected_artifact_paths": []
+        }
+      ],
+      "process": "sequential",
+      "consensus_config": {
+        "strategy": "none",
+        "threshold": 1.0,
+        "max_rounds": 1
+      },
+      "manager_agent_id": null,
+      "join": "any",
+      "expected_artifact_paths": [],
+      "requires_visual_evidence": false
+    },
+    {
+      "kind": "approval",
+      "id": "gate_edl_approval",
+      "label": "Human Review and Approval of EDL",
+      "action_description": "Approve final multi-camera Edit Decision List before rendering video",
+      "required_role": "admin",
+      "timeout_seconds": 3600,
+      "boundary_rules": []
+    },
+    {
+      "kind": "crew",
+      "id": "crew_render_and_qc",
+      "label": "Render and QC Crew",
+      "agents": [
+        {
+          "id": "render_engineer",
+          "role": "Render Engineer",
+          "goal": "Render approved EDL into final master video",
+          "backstory": "Encoding engineer managing automated render pipelines",
+          "model": "gemini-1.5-flash",
+          "tool_ids": [
+            "ffmpeg_render",
+            "file_read"
+          ],
+          "skill_ids": [],
+          "max_iterations": 3,
+          "temperature": 0.1,
+          "guardrails": [],
+          "knowledge_capsule_ids": [],
+          "tier": "specialist"
+        },
+        {
+          "id": "qc_specialist",
+          "role": "QC Specialist",
+          "goal": "Verify rendered video duration, audio-video sync, and frame integrity",
+          "backstory": "Strict broadcast quality assurance specialist",
+          "model": "gemini-1.5-flash",
+          "tool_ids": [
+            "ffmpeg_qc",
+            "ffprobe_info"
+          ],
+          "skill_ids": [],
+          "max_iterations": 3,
+          "temperature": 0.1,
+          "guardrails": [],
+          "knowledge_capsule_ids": [],
+          "tier": "specialist"
+        }
+      ],
+      "tasks": [
+        {
+          "id": "task_render",
+          "agent_id": "render_engineer",
+          "description": "Render approved cuts from edl.json into final_output.mp4",
+          "expected_output": "Final rendered video master",
+          "output_schema": "text",
+          "output_schema_json": null,
+          "context_task_ids": [],
+          "expected_artifact_paths": []
+        },
+        {
+          "id": "task_qc",
+          "agent_id": "qc_specialist",
+          "description": "Execute automated quality control on final_output.mp4",
+          "expected_output": "Passed QC report verified with zero defects",
+          "output_schema": "text",
+          "output_schema_json": null,
+          "context_task_ids": [
+            "task_render"
+          ],
+          "expected_artifact_paths": []
+        }
+      ],
+      "process": "sequential",
+      "consensus_config": {
+        "strategy": "none",
+        "threshold": 1.0,
+        "max_rounds": 1
+      },
+      "manager_agent_id": null,
+      "join": "any",
+      "expected_artifact_paths": [],
+      "requires_visual_evidence": false
+    },
+    {
+      "kind": "end",
+      "id": "end",
+      "label": "Video Production Complete"
+    }
+  ],
+  "edges": [
+    {
+      "source": "start",
+      "target": "crew_direction_and_editing",
+      "route": null,
+      "loop_back": false
+    },
+    {
+      "source": "crew_direction_and_editing",
+      "target": "gate_edl_approval",
+      "route": null,
+      "loop_back": false
+    },
+    {
+      "source": "gate_edl_approval",
+      "target": "crew_render_and_qc",
+      "route": null,
+      "loop_back": false
+    },
+    {
+      "source": "crew_render_and_qc",
+      "target": "end",
+      "route": null,
+      "loop_back": false
+    }
+  ],
+  "learning_edges": [],
+  "layout": {},
+  "modes": {
+    "live": true,
+    "dry_run": false
+  }
+}

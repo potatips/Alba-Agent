@@ -1,13 +1,26 @@
+use std::collections::VecDeque;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
-use nexus_albaai::domain::ExecutionScope;
+use nexus_albaai::checkpoints::sqlite::SqliteCheckpointStore;
+use nexus_albaai::checkpoints::store::{CheckpointError, CheckpointStore};
+use nexus_albaai::domain::{ApprovalDecision, ApprovalStatus, ExecutionScope, ToolCall};
+use nexus_albaai::events::sink::InMemoryEventSink;
+use nexus_albaai::governance::policy::DefaultApprovalPolicy;
+use nexus_albaai::models::adapter::ModelClient;
+use nexus_albaai::models::types::{ModelError, ModelRequest, ModelResponse};
+use nexus_albaai::schema::WorkflowSpec;
+use nexus_albaai::tools::register_workspace_tools_with_audit;
+use nexus_albaai::tools::types::ToolRegistry;
 use nexus_albaai::tools::video::{
     find_binary, FfmpegQcTool, FfmpegRenderTool, FfmpegSyncAudioTool, FfprobeInfoTool,
 };
 use nexus_albaai::tools::Tool;
+use nexus_albaai::workflow::engine::{WorkflowExecutor, WorkflowOutcome};
+use nexus_albaai::workflow::validation::validate_workflow_spec;
 use tempfile::tempdir;
 use uuid::Uuid;
 
@@ -686,4 +699,255 @@ async fn test_ffmpeg_qc_detects_black_frames() {
     assert!(reasons
         .iter()
         .any(|r| r.as_str().unwrap().contains("black frames")));
+}
+
+struct MockVideoCrewModelClient {
+    responses: Mutex<VecDeque<ModelResponse>>,
+}
+
+impl MockVideoCrewModelClient {
+    fn new(responses: Vec<ModelResponse>) -> Self {
+        Self {
+            responses: Mutex::new(VecDeque::from(responses)),
+        }
+    }
+}
+
+impl ModelClient for MockVideoCrewModelClient {
+    async fn complete(&self, _request: &ModelRequest) -> Result<ModelResponse, ModelError> {
+        let mut queue = self.responses.lock().unwrap();
+        if let Some(resp) = queue.pop_front() {
+            Ok(resp)
+        } else {
+            Ok(ModelResponse {
+                content: Some("Default video crew response".to_string()),
+                tool_calls: vec![],
+                usage: None,
+            })
+        }
+    }
+}
+
+#[test]
+fn test_video_crew_workflow_spec_validates() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workflow_path = manifest_dir.join("video-crew-workflow.json");
+    let content = fs::read_to_string(&workflow_path).unwrap();
+    let spec: WorkflowSpec = serde_json::from_str(&content).unwrap();
+
+    assert_eq!(spec.name, "Video Multi-Camera Assembly and QC Workflow");
+    assert_eq!(spec.nodes.len(), 5);
+    assert_eq!(spec.edges.len(), 4);
+
+    let res = validate_workflow_spec(&spec);
+    assert!(res.is_ok(), "Validation failed: {:?}", res);
+}
+
+#[tokio::test]
+async fn test_video_crew_workflow_e2e_approval_and_idempotent_journal() {
+    if !is_tool_available("ffmpeg") || !is_tool_available("ffprobe") {
+        eprintln!("SKIPPED: ffmpeg or ffprobe not installed on host");
+        return;
+    }
+
+    let ws = tempdir().unwrap();
+    let cam1 = ws.path().join("cam1.mp4");
+    let cam2 = ws.path().join("cam2.mp4");
+    let master = ws.path().join("master.wav");
+
+    assert!(create_synthetic_clip(&cam1, 5, 440, 320, 240, 30));
+    assert!(create_synthetic_clip(&cam2, 5, 440, 320, 240, 30));
+    assert!(create_synthetic_audio(&master, 5, 440));
+
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workflow_path = manifest_dir.join("video-crew-workflow.json");
+    let content = fs::read_to_string(&workflow_path).unwrap();
+    let spec: WorkflowSpec = serde_json::from_str(&content).unwrap();
+
+    let responses = vec![
+        ModelResponse {
+            content: Some("Director cut plan: cam1 (0-2s) to cam2 (2-4s)".to_string()),
+            tool_calls: vec![],
+            usage: None,
+        },
+        ModelResponse {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: "call_sync_1".to_string(),
+                name: "ffmpeg_sync_audio".to_string(),
+                arguments: serde_json::json!({
+                    "master_audio_path": "master.wav",
+                    "camera_paths": ["cam1.mp4", "cam2.mp4"],
+                    "min_confidence": 0.30
+                }),
+            }],
+            usage: None,
+        },
+        ModelResponse {
+            content: Some("Synchronized EDL compiled and ready for approval".to_string()),
+            tool_calls: vec![],
+            usage: None,
+        },
+        ModelResponse {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: "call_render_1".to_string(),
+                name: "ffmpeg_render".to_string(),
+                arguments: serde_json::json!({
+                    "output_path": "final_output.mp4",
+                    "edl": {
+                        "cuts": [
+                            {
+                                "camera": "cam1.mp4",
+                                "source_start_ms": 1000,
+                                "source_end_ms": 3000,
+                                "timeline_start_ms": 0,
+                                "timeline_end_ms": 2000
+                            },
+                            {
+                                "camera": "cam2.mp4",
+                                "source_start_ms": 2000,
+                                "source_end_ms": 4000,
+                                "timeline_start_ms": 2000,
+                                "timeline_end_ms": 4000
+                            }
+                        ],
+                        "master_audio_path": "master.wav"
+                    }
+                }),
+            }],
+            usage: None,
+        },
+        ModelResponse {
+            content: Some("Render completed to final_output.mp4".to_string()),
+            tool_calls: vec![],
+            usage: None,
+        },
+        ModelResponse {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: "call_qc_1".to_string(),
+                name: "ffmpeg_qc".to_string(),
+                arguments: serde_json::json!({
+                    "rendered_path": "final_output.mp4",
+                    "expected_duration_ms": 4000
+                }),
+            }],
+            usage: None,
+        },
+        ModelResponse {
+            content: Some("QC inspection confirmed broadcast quality".to_string()),
+            tool_calls: vec![],
+            usage: None,
+        },
+    ];
+
+    let model = Arc::new(MockVideoCrewModelClient::new(responses));
+    let db_dir = tempdir().unwrap();
+    let db_path = db_dir.path().join("video_crew_run.db");
+    let store = Arc::new(SqliteCheckpointStore::new(&db_path).unwrap());
+    let events = Arc::new(InMemoryEventSink::new());
+    let policy = Arc::new(DefaultApprovalPolicy::new());
+
+    let mut registry = ToolRegistry::new();
+    register_workspace_tools_with_audit(
+        &mut registry,
+        ws.path(),
+        Some(events.clone()),
+        Some(store.clone()),
+    );
+
+    let executor = WorkflowExecutor::new(model, store.clone(), events, policy, registry, ws.path())
+        .with_author_id("director_alice");
+
+    let scope = ExecutionScope::new(spec.tenant_id, spec.workspace_id, Uuid::new_v4()).unwrap();
+
+    let first_outcome = executor
+        .start_workflow(&spec, scope, None)
+        .await
+        .expect("Initial workflow start should succeed");
+
+    let approval_id = match first_outcome {
+        WorkflowOutcome::AwaitingApproval {
+            node_id,
+            approval_id,
+            action_description,
+        } => {
+            assert_eq!(node_id, "gate_edl_approval");
+            assert!(action_description.contains("Approve final multi-camera"));
+            approval_id
+        }
+        other => panic!("Expected AwaitingApproval outcome, got {:?}", other),
+    };
+
+    let approval = store
+        .get_approval(&scope, approval_id)
+        .await
+        .unwrap()
+        .expect("Approval entry must exist in store");
+    assert_eq!(approval.status, ApprovalStatus::Pending);
+    assert_eq!(approval.author_id.as_deref(), Some("director_alice"));
+
+    let author_approve_res = store
+        .resolve_approval(
+            &scope,
+            approval_id,
+            ApprovalDecision::AllowOnce,
+            "director_alice",
+        )
+        .await;
+    assert!(
+        matches!(author_approve_res, Err(CheckpointError::InvalidState(_))),
+        "Author self-approval must be rejected for separation of duties"
+    );
+
+    let approver_resolve = store
+        .resolve_approval(
+            &scope,
+            approval_id,
+            ApprovalDecision::AllowOnce,
+            "producer_bob",
+        )
+        .await;
+    assert!(approver_resolve.is_ok(), "Producer approval must succeed");
+
+    let resume_outcome = executor
+        .resume_workflow(&spec, scope)
+        .await
+        .expect("Workflow resumption must succeed");
+
+    assert!(
+        matches!(resume_outcome, WorkflowOutcome::Completed(_)),
+        "Workflow must reach Completed outcome post-approval"
+    );
+
+    let output_file = ws.path().join("final_output.mp4");
+    assert!(
+        output_file.is_file(),
+        "Rendered MP4 file must exist on disk"
+    );
+
+    let render_tool_status = store
+        .get_tool_call_status(&scope, "crew_render_and_qc", "call_render_1")
+        .await
+        .unwrap();
+    assert!(render_tool_status.is_some());
+    let (status_str, cached_out) = render_tool_status.unwrap();
+    assert_eq!(status_str, "consumed");
+    assert!(cached_out.unwrap().contains("final_output.mp4"));
+
+    let qc_tool_status = store
+        .get_tool_call_status(&scope, "crew_render_and_qc", "call_qc_1")
+        .await
+        .unwrap();
+    assert!(qc_tool_status.is_some());
+    let (qc_status, qc_out) = qc_tool_status.unwrap();
+    assert_eq!(qc_status, "consumed");
+    assert!(qc_out.unwrap().contains("\"qc_passed\":true"));
+
+    let second_resume = executor.resume_workflow(&spec, scope).await.unwrap();
+    assert!(
+        matches!(second_resume, WorkflowOutcome::Completed(_)),
+        "Idempotent re-execution must complete immediately without rerunning"
+    );
 }

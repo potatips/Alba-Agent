@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocale } from "@/components/locale-provider";
 import { apiRequest, readError } from "@/lib/api";
-import { SubscriptionHub } from "@/components/providers/subscription-hub";
 import type { NavPage } from "@/components/studio-app";
 
 type Model = { id: string; kind: string; prompt_usd_per_million: string | null; completion_usd_per_million: string | null };
@@ -12,8 +11,8 @@ type Credential = { id: string; preset_id: string; provider: string; masked_key:
 type Category = "subscription" | "unified" | "direct" | "local" | "media" | "tools" | "channel";
 const categoryNames: Record<Category, string> = { subscription: "Subscription plans", unified: "Unified gateways", direct: "Direct model providers", local: "Local models & subscription bridges", media: "Voice & media", tools: "Search, integrations & sandbox", channel: "Social channels" };
 const marketplaceCategories: Category[] = ["unified", "direct", "local", "media", "tools"];
-// The everyday "other models" row; everything else lives under expert mode.
-const OTHER_MODEL_PRESETS = ["openai", "anthropic", "ollama"];
+const DIRECT_MODEL_PRESETS = ["openai", "anthropic", "google_gemini", "deepseek", "local"];
+const OTHER_MODEL_PRESETS = ["custom_openai"];
 const modelRoles = [
   ["orchestrator", "Default orchestrator LLM", "chat"], ["fast", "Default fast / low-cost LLM", "chat"],
   ["coding", "Default coding sandbox LLM", "chat"], ["embedding", "Default embedding model", "embedding"], ["voice", "Default voice TTS / STT", "voice"],
@@ -23,12 +22,7 @@ function modelReference(preset: Preset, model: Model): string {
   let provider = preset.id;
   if (preset.id === "shopaikey") {
     provider = model.id.startsWith("claude-") ? "anthropic" : model.id.startsWith("gemini-") || model.id.startsWith("text-embedding-004") ? "gemini" : model.id.startsWith("deepseek-") ? "deepseek" : "openai";
-  } else if (preset.id === "openai_subscription") provider = "openai";
-  else if (preset.id === "claude_subscription") provider = "anthropic";
-  else if (preset.id === "gemini_subscription" || preset.id === "google_gemini") provider = "gemini";
-  else if (preset.id === "github_copilot") provider = model.id.startsWith("claude-") ? "anthropic" : model.id.startsWith("gemini-") ? "gemini" : "openai";
-  else if (preset.id === "cliproxyapi") provider = "openai";
-  else if (preset.id === "lm_studio" || preset.id === "local_vllm") provider = "vllm";
+  } else if (preset.id === "google_gemini") provider = "gemini";
   else if (preset.id === "custom_openai_gateway") provider = "openai";
   return `${provider}/${model.id}`;
 }
@@ -117,7 +111,7 @@ export function ProviderSettings({ token, onNavigate }: { token: string; onNavig
   const requestConfigure = openConfigure;
 
   const customHostWarning = useMemo(() => {
-    if (!selected || ["openai", "anthropic", "google_gemini", "deepseek"].includes(selected.id) || !baseUrl) return null;
+    if (!selected || ["openai", "anthropic", "google_gemini", "deepseek", "local"].includes(selected.id) || !baseUrl) return null;
     try {
       const parsed = new URL(baseUrl);
       return `khóa API sẽ được gửi tới ${parsed.host}`;
@@ -131,10 +125,11 @@ export function ProviderSettings({ token, onNavigate }: { token: string; onNavig
     setBusy(true); setError(""); setNotice("");
     try {
       const isOfficial = ["openai", "anthropic", "google_gemini", "deepseek"].includes(selected.id);
+      const isLocal = selected.id === "local";
       const body: Record<string, unknown> = {
         preset_id: selected.id,
         base_url: isOfficial ? null : (baseUrl || null),
-        confirm_custom_host: !isOfficial,
+        confirm_custom_host: !isOfficial && !isLocal,
         is_default: isDefault,
         default_models: defaults
       };
@@ -185,8 +180,8 @@ export function ProviderSettings({ token, onNavigate }: { token: string; onNavig
     <header className="provider-page-header"><div><h1>{t("settings.title")}</h1><p>{t("settings.subtitle")}</p></div></header>
     {error && <div className="provider-alert provider-alert--error" role="alert">{error}</div>}
     {notice && <div className="provider-alert" role="status">{notice}</div>}
-    <section className="settings-section"><header><span className="step-badge">1</span><div><h2>{t("accounts.title")}</h2><p>{t("accounts.description")}</p></div></header>
-      <SubscriptionHub token={token} credentials={credentials} onChanged={() => token ? reload(token) : Promise.resolve()} hideHeading /></section>
+    <section className="settings-section"><header><span className="step-badge">1</span><div><h2>{t("settings.s1.title")}</h2><p>{t("settings.s1.body")}</p></div></header>
+      <div className="provider-card-grid">{DIRECT_MODEL_PRESETS.map((id) => presets.find((preset) => preset.id === id)).filter((preset): preset is Preset => preset !== undefined).map(card)}</div></section>
     <section className="settings-section settings-section--recommended"><header><span className="step-badge">2</span><div><h2>{t("settings.s2.title")}</h2><p>{t("settings.s2.body")}</p></div></header>
       <HarnessCard token={token} saved={shop} onChanged={() => token ? reload(token) : Promise.resolve()} /></section>
     <section className="settings-section"><header><span className="step-badge">3</span><div><h2>{t("settings.s3.title")}</h2><p>{t("settings.s3.body")}</p></div></header>

@@ -10,7 +10,7 @@ const models = [
 ];
 
 const accountVariants = ["high", "medium", "low"].map((level) => ({
-  id: `gemini/nexus-account-gemini:gemini-flash-${level}`, model: `Gemini Flash (${level[0].toUpperCase()}${level.slice(1)})`,
+  id: `gemini/gemini-flash@${level}`, model: `Gemini Flash (${level[0].toUpperCase()}${level.slice(1)})`,
   provider: "gemini", group: "Google account", source: "workspace", local: false,
 }));
 
@@ -39,12 +39,12 @@ test("switching models preserves a supported effort without inventing provider o
   assert.deepEqual(effortChoices(plain,plain[0].id),[]);
 });
 
-test("Codex model and effort variants remain a single model with an independent effort selector", () => {
-  const available = ["low","high","xhigh","ultra"].map(level=>({...models[0],id:`openai/nexus-account-codex:gpt-sol@${level}`,model:`GPT Sol (${level[0].toUpperCase()}${level.slice(1)})`}));
+test("reasoning model and effort variants remain a single model with an independent effort selector", () => {
+  const available = ["low","high","xhigh","ultra"].map(level=>({...models[0],id:`openai/gpt-sol@${level}`,model:`GPT Sol (${level[0].toUpperCase()}${level.slice(1)})`}));
   assert.equal(modelChoices(available,available[1].id).length,1);
   assert.equal(modelChoices(available,available[1].id)[0].model,"GPT Sol");
   assert.deepEqual(effortChoices(available,available[1].id).map(item=>item.value),["low","high","xhigh","ultra"]);
-  assert.equal(effortChoices(available,available[1].id)[2].id,"openai/nexus-account-codex:gpt-sol@xhigh");
+  assert.equal(effortChoices(available,available[1].id)[2].id,"openai/gpt-sol@xhigh");
 });
 
 test("labels drop the provider but keep model names that contain a slash", () => {
@@ -52,17 +52,16 @@ test("labels drop the provider but keep model names that contain a slash", () =>
   assert.equal(modelLabel("openrouter/openai/gpt-4.1-mini"), "openai/gpt-4.1-mini");
   assert.equal(modelLabel("claude"), "claude");
   assert.equal(modelLabel(null), "");
-  assert.equal(modelLabel("gemini/nexus-account-gemini:gemini-3.8-flash-low"), "gemini-3.8-flash-low");
+  assert.equal(modelLabel("gemini/gemini-3.8-flash@low"), "gemini-3.8-flash@low");
 });
 
-test("a legacy account selection migrates to its own concrete model without changing accounts", () => {
-  const available = [...models, {id:"gemini/nexus-account-gemini:gemini-3.8-flash-high",provider:"gemini",model:"Gemini 3.8 Flash (High)"}];
-  assert.equal(resolveSelection(available,"gemini/nexus-account-gemini:default",models[0].id,["gemini"]),available.at(-1).id);
-  assert.equal(resolveSelection(available,"gemini/nexus-account-gemini:gemini-3.8-flash-high",models[0].id,["gemini"]),available.at(-1).id);
+test("a connected model selection resolves directly when present", () => {
+  const available = [...models, {id:"gemini/gemini-3.8-flash@high",provider:"gemini",model:"Gemini 3.8 Flash (High)"}];
+  assert.equal(resolveSelection(available,"gemini/gemini-3.8-flash@high",models[0].id,["gemini"]),available.at(-1).id);
 });
 
-test("a removed Copilot selection cannot survive through another OpenAI connection", () => {
-  assert.equal(resolveSelection(models,"openai/nexus-account-copilot:default",models[0].id,["openai"]),models[0].id);
+test("an unknown selection falls back to the server default or first model", () => {
+  assert.equal(resolveSelection(models,"unreachable/unknown-model",models[0].id,["openai"]),models[0].id);
 });
 
 test("the remembered model wins while it exists, then the server default, then the first model", () => {

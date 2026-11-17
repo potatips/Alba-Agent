@@ -33,11 +33,9 @@ type Props = {
   rows?: number;
   autoFocus?: boolean;
   label: string;
-  /** Called when "/" is typed at the start of a word: the owner decides what to open. */
   onSlash?: () => void;
 };
 
-/** The message box of Antigravity: one rounded box with attach, model, permissions, dictation and send. Shared by the home screen and the conversation. */
 export function PromptBox({ value, onChange, onSubmit, onOpenSettings, placeholder, busy, canSend, rows = 1, autoFocus, label, onSlash }: Props) {
   const { t, locale } = useLocale();
   const workspace = useWorkspace();

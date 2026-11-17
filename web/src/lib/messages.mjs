@@ -614,8 +614,8 @@ const vi = {
 
   "settings.title": "Mô hình",
   "settings.subtitle": "Chọn một cách để đội Agent dùng mô hình AI. Một cách là đủ; khóa được mã hoá và chỉ hiện dạng che.",
-  "settings.s1.title": "Gói đăng ký sẵn có",
-  "settings.s1.body": "Kết nối tài khoản Codex, Claude hoặc Gemini qua ứng dụng chính thức. Hoàn tất đăng nhập trong trình duyệt rồi kiểm tra kết nối.",
+  "settings.s1.title": "Kết nối mô hình trực tiếp",
+  "settings.s1.body": "Kết nối các nhà cung cấp mô hình AI chính thức hoặc mô hình cục bộ trên máy qua API key an toàn.",
   "settings.s2.title": "Alba Harness",
   "settings.s2.body": "Nhà cung cấp API Key bên thứ 3 (tương thích OpenAI): nhập URL API và API Key rồi bấm Lưu. Danh sách mô hình được lấy tự động từ nhà cung cấp.",
   "settings.s3.title": "Mô hình khác / Chạy máy cá nhân",
@@ -1320,8 +1320,8 @@ const en = {
 
   "settings.title": "Models",
   "settings.subtitle": "Pick one way for the Agent team to use AI models. One is enough; keys are encrypted and only shown masked.",
-  "settings.s1.title": "Existing subscription",
-  "settings.s1.body": "Connect Codex, Claude or Gemini through the official application. Complete browser sign-in, then check the connection.",
+  "settings.s1.title": "Direct model connections",
+  "settings.s1.body": "Connect official AI model providers or local on-device models using secure API keys.",
   "settings.s2.title": "Alba Harness",
   "settings.s2.body": "A third-party API-key provider (OpenAI-compatible): enter the API URL and API key, then press Save. The model list is fetched from the provider automatically.",
   "settings.s3.title": "Other models / run on your machine",

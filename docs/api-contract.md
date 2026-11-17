@@ -125,7 +125,7 @@ The frontend is the unmodified `NexusAgent/apps/web` (Next.js 15, Tailwind v3).
 
 ---
 
-## 3.1 Phase G6A Identity & Account API Contract (Antigravity Google OAuth Model)
+## 3.1 Phase G6A Identity & Account API Contract (Alba Google OAuth Model)
 
 ### Architecture & Security Invariants
 1. **Mandatory Google Authentication**:

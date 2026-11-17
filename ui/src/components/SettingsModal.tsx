@@ -157,7 +157,7 @@ export function SettingsModal({
                   : activeTab === "models"
                     ? "Manage provider credentials, model selection and token budgets."
                     : activeTab === "browser"
-                      ? "Control Antigravity browser automation, DevTools proxy and preview."
+                      ? "Control Alba browser automation, DevTools proxy and preview."
                       : "Configure environment settings and developer tools."}
               </p>
             </div>
@@ -388,7 +388,7 @@ export function SettingsModal({
           {activeTab === "browser" && (
             <div className="mt-5 space-y-4 text-xs">
               <div className="rounded-xl border border-zinc-800 bg-[#121215] p-3.5">
-                <p className="font-medium text-zinc-200">Antigravity Browser Automation</p>
+                <p className="font-medium text-zinc-200">Alba Browser Automation</p>
                 <p className="mt-1 text-[11px] text-zinc-400">
                   Enables live DevTools browser control, responsive layout inspections, and local server page interactions.
                 </p>

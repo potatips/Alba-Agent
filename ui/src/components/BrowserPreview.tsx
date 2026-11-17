@@ -125,7 +125,7 @@ export function BrowserPreview({
           <iframe
             key={refreshKey}
             src={url}
-            title="Antigravity Browser Preview"
+            title="Alba Browser Preview"
             className="h-full w-full border-0 bg-white"
             sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
           />

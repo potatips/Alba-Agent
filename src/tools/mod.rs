@@ -10,6 +10,7 @@ pub mod file_write;
 pub mod path_guard;
 pub mod run_cmd;
 pub mod types;
+pub mod video;
 
 pub use dir_list::*;
 pub use file_read::*;
@@ -17,6 +18,7 @@ pub use file_write::*;
 pub use path_guard::*;
 pub use run_cmd::*;
 pub use types::*;
+pub use video::*;
 
 pub fn register_workspace_tools(
     registry: &mut ToolRegistry,
@@ -75,4 +77,5 @@ pub fn register_workspace_tools_with_audit(
     registry.register(Arc::new(ListDirTool::new(root)));
     registry.register(Arc::new(write_tool));
     registry.register(Arc::new(cmd_tool));
+    registry.register(Arc::new(FfprobeInfoTool::new(root)));
 }

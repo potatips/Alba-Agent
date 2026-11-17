@@ -201,3 +201,42 @@ pub fn resolve_writable_file(
 
     Ok((real_root, target, rel_str))
 }
+
+pub fn resolve_readable_file(
+    workspace_root: &Path,
+    raw: &str,
+) -> Result<(PathBuf, PathBuf, String), ToolError> {
+    let real_root = fs::canonicalize(workspace_root)
+        .map_err(|e| ToolError::ExecutionFailed(format!("Invalid workspace root: {}", e)))?;
+
+    let (rel_buf, rel_str) = normalize_relative_path(raw, false)?;
+    let target = real_root.join(&rel_buf);
+
+    if !target.exists() {
+        return Err(ToolError::NotFound(format!(
+            "File '{}' does not exist",
+            raw
+        )));
+    }
+
+    let real_target = fs::canonicalize(&target).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => ToolError::NotFound(format!("File '{}' not found", raw)),
+        _ => ToolError::ExecutionFailed(format!("Cannot access '{}': {}", raw, e)),
+    })?;
+
+    if !real_target.starts_with(&real_root) {
+        return Err(ToolError::PathTraversal(format!(
+            "Resolved path '{}' escapes workspace root via symlink",
+            raw
+        )));
+    }
+
+    if real_target.is_dir() {
+        return Err(ToolError::InvalidArguments(format!(
+            "Path '{}' is a directory, not a file",
+            raw
+        )));
+    }
+
+    Ok((real_root, real_target, rel_str))
+}

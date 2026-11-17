@@ -2,16 +2,18 @@
 
 ## 1. Header
 - **Phase**: G6A (Google Accounts and Provider Connections)
-- **Branch**: `feat/g6a-accounts`
-- **Head Commit Hash**: `b5f518310b1fe9c317983676991fec5222d691bc` (`b5f5183`)
-- **Date**: 2026-11-17
+- **Branch**: `feat/cleanup-connections`
+- **Head Commit Hash**: `176b319714fa46e4ad469cb7356ad044140a3260` (`176b319`, base: `fdb13e4`, code HEAD trước commit báo cáo này)
+- **Date**: 2026-11-18
 - **Host Environment**: macOS (Apple Silicon arm64, Darwin 24.3.0)
 - **Role**: Owner Phase G6A
-- **Machine Verdict**: PASS
+- **Machine Verdict**: PASS (Kiểm tại commit 176b319)
 
 ---
 
 ## 2. Verdict
+> **Kiểm tại commit 176b319** (nhánh `feat/cleanup-connections`, commit mã nguồn ngay trước commit báo cáo này; verifier sẽ chạy lại trên HEAD mới. Nếu verifier đòi hash của chính commit báo cáo, DỪNG và báo, không tự đoán).
+
 | Slice | Title | Verdict | Commit | Evidence |
 | :--- | :--- | :--- | :--- | :--- |
 | G6A-S1 | Provider Auth Research & Label Census | PASS | `ec02b39` | Census located hardcoded fake plan `ENTERPRISE` in `src/server/auth.rs:11` and false `Đã kết nối` in `src/server/routes/settings.rs:26`; documented API key and OAuth policies for Anthropic, OpenAI, Gemini, DeepSeek |
@@ -21,7 +23,8 @@
 | G6A-S5 | Native Provider Adapters | PASS | `d56fd40` | Native Anthropic Messages API (`AnthropicClient`), Gemini `generateContent` API (`GeminiClient`), OpenAI/DeepSeek (`OpenAiCompatibleClient`) behind `ModelClient`; `tests/g6a_providers_s5_tests.rs` (19 ok) |
 | G6A-S6 | Provider Connections API & UI | PASS | `2c14639` | Scoped to authenticated Google `sub`; credentials in Keychain under `account:{sub}:provider:{id}`; masked keys; zero plaintext secret leakage; `tests/g6a_providers_s6_tests.rs` (5 ok), `web/test/provider-credentials.test.mjs` (3 ok) |
 | G6A-S7 | Engine Provider Dispatch | PASS | `76b7ad0` | Dispatches workflow model calls via `ServerModelClient::for_account` to active account provider; fails closed on missing/revoked keys; audit rows emitted without secret leakage; `tests/g6a_engine_s7_tests.rs` (6 ok) |
-| G6A-Harden | Provider Host Pinning | PASS | `ec02b39` | Official presets pin immutable hosts and reject client `base_url` with HTTP 400; tampered hosts in SQLite fail closed; redirects disabled via `reqwest::redirect::Policy::none()`; custom presets validated; `tests/g6a_pinned_hosts_tests.rs` (6 ok) |
+| G6A-Harden | Provider Host Pinning & Loopback Policy | PASS | `ec02b39`, `176b319` | Official presets pin immutable hosts and reject client `base_url` with HTTP 400; loopback LLMs supported exclusively via `local` preset without API key; `custom` presets strictly reject loopback hosts; IPv4-mapped private IPs blocked; `tests/g6a_pinned_hosts_tests.rs` (7 ok) |
+| G6A-Cleanup | Remove App Logins & Nexus Account Bridges | PASS | `fdb13e4` | Purged third-party official app logins (Codex/Claude/Gemini/Antigravity/ChatGPT/Copilot); deleted legacy nexus-account bridge code; cleaned up UI & i18n keys; preserved Google Account as single authentic identity; web tests (99 ok) |
 | G6A-Deps | URL Dependency Evaluation | PASS | `b5f5183` | Recorded `url 2.5` crate evaluation in `tasks/decisions.tsv`; synchronized both `decisions.tsv` files with clean zero diff |
 
 ---
@@ -37,12 +40,12 @@ All mandatory verification gates passed cleanly with exit code 0 using `CARGO_TA
 2. `cargo clippy --all-targets -- -D warnings`:
    - Command: `cargo clippy --all-targets -- -D warnings`
    - Exit code: 0
-   - Output: 0 warnings, 0 errors across library, binaries, and all 42 test suites
+   - Output: 0 warnings, 0 errors across library, binaries, and all 42 test targets
 
 3. `cargo test -- --test-threads=2`:
    - Command: `cargo test -- --test-threads=2`
    - Exit code: 0
-   - Summary: **266 passed, 0 failed, 0 ignored** across 42 test targets:
+   - Summary: **267 passed, 0 failed, 0 ignored** across 42 test targets:
      - `unittests src/lib.rs`: 0 passed, 0 failed
      - `unittests src/main.rs`: 0 passed, 0 failed
      - `tests/api_approvals_tests.rs`: 3 passed, 0 failed
@@ -70,7 +73,7 @@ All mandatory verification gates passed cleanly with exit code 0 using `CARGO_TA
      - `tests/g6a_accounts_s2_tests.rs`: 13 passed, 0 failed
      - `tests/g6a_accounts_s3_tests.rs`: 17 passed, 0 failed
      - `tests/g6a_engine_s7_tests.rs`: 6 passed, 0 failed
-     - `tests/g6a_pinned_hosts_tests.rs`: 6 passed, 0 failed
+     - `tests/g6a_pinned_hosts_tests.rs`: 7 passed, 0 failed
      - `tests/g6a_providers_s5_tests.rs`: 19 passed, 0 failed
      - `tests/g6a_providers_s6_tests.rs`: 5 passed, 0 failed
      - `tests/integration_tests.rs`: 31 passed, 0 failed
@@ -119,6 +122,7 @@ All mandatory verification gates passed cleanly with exit code 0 using `CARGO_TA
 3. **Session Handoff Protection**: Google OAuth callback renders static HTML with zero tokens in body, headers, or URL. Single-use `handoff_id` is consumed once and bound to a 300s expiration, returning an HttpOnly SameSite=Strict session cookie.
 4. **Host Pinning Defense**: Official presets (`openai`, `anthropic`, `google_gemini`, `deepseek`) pin base URLs to hardcoded constants and reject client-provided `base_url` with HTTP 400. Stored connections with tampered hosts fail closed at engine runtime before network contact. HTTP redirects are disabled via `Policy::none()`.
 5. **Fail-Closed Sign-Out**: Sign-out immediately purges local session cookies, purges all profile secrets from Keychain, invokes external Google revocation with a 5s timeout, and returns HTTP 207 Multi-Status with error details if any remote step fails.
+6. **Local LLM Isolation**: Local models on loopback hosts (`127.0.0.1`, `localhost`, `::1`) are supported exclusively through the dedicated `local` preset without requiring API keys. Custom presets strictly reject loopback addresses and require public HTTPS with user confirmation.
 
 ---
 
@@ -151,8 +155,16 @@ Known limitations and design deviations:
    - Hostnames are not resolved via DNS at registration time to prevent offline test failures and network dependency during validation. Consequently, a public domain name configured to resolve to a private IP (DNS rebinding) is not detected at URL validation time.
    - Mitigation: Custom presets require an explicit confirmation flag `confirm_custom_host: true`, enforce HTTPS unless loopback, disable HTTP redirect following (`reqwest::redirect::Policy::none()`), and display a clear destination warning in the UI before API keys are dispatched.
 2. **IPv4-Mapped IPv6 Addresses**:
-   - `validate_custom_base_url` inspects native IPv6 address properties but does not unwrap dual-stack IPv4-mapped IPv6 addresses (`::ffff:192.168.x.x`).
+   - `validate_custom_base_url` inspects native IPv6 address properties and unwraps IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`) to validate against IPv4 private, loopback, link-local, broadcast, and unspecified ranges.
    - Mitigation: Loopback and public HTTPS policies remain enforced; custom hosts display destination warnings.
+3. **Commit `fdb13e4` - Gỡ luồng đăng nhập qua ứng dụng bên ngoài (Codex/Claude/Gemini) và xóa nexus-account**:
+   - Gỡ bỏ toàn bộ các nút đăng nhập và luồng kết nối phụ thuộc vào ứng dụng máy tính hoặc tiện ích mở rộng bên ngoài (Codex, Claude Code, Gemini CLI, Antigravity, ChatGPT, Copilot).
+   - Xóa bỏ hoàn toàn cầu nối `nexus-account-*`, các chuỗi bản dịch i18n không còn dùng (`accounts.login.*`, `accounts.detail.*`), cập nhật `models.mjs` và các test liên quan (`web/test/models.test.mjs`).
+   - Kiến trúc được thu hẹp về chuẩn mực: Google OAuth PKCE là danh tính duy nhất của Alba, và các mô hình LLM được tích hợp thuần túy qua khóa API trực tiếp hoặc preset máy chủ nội bộ.
+4. **Commit `176b319` - Bổ sung preset local cho LLM loopback, từ chối loopback ở custom và chặn IPv4-mapped private**:
+   - Bổ sung preset `"local"` dành riêng cho các mô hình chạy cục bộ (Ollama, LM Studio, vLLM, llama.cpp): chỉ chấp nhận các loopback host (`127.0.0.1`, `localhost`, `::1`, `[::1]`) trên giao thức `http` hoặc `https`, không yêu cầu và không gửi API key.
+   - Chặn hoàn toàn host loopback ở preset `"custom"` / `"custom_openai"`: chỉ cho phép các endpoint HTTPS công khai, yêu cầu cờ xác nhận `confirm_custom_host: true`.
+   - Mở rộng kiểm tra địa chỉ IP để chặn các địa chỉ IPv4-mapped IPv6 thuộc dải private, loopback, link-local hoặc unspecified (`::ffff:127.x.x.x`, `::ffff:10.x.x.x`, `::ffff:192.168.x.x`, `::ffff:172.16.x.x`, `::ffff:169.254.x.x`, `::ffff:0.0.0.0`).
 
 ---
 

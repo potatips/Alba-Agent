@@ -78,4 +78,5 @@ pub fn register_workspace_tools_with_audit(
     registry.register(Arc::new(write_tool));
     registry.register(Arc::new(cmd_tool));
     registry.register(Arc::new(FfprobeInfoTool::new(root)));
+    registry.register(Arc::new(FfmpegSyncAudioTool::new(root)));
 }

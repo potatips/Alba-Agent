@@ -4,7 +4,9 @@ use std::path::Path;
 use std::process::Command;
 
 use nexus_albaai::domain::ExecutionScope;
-use nexus_albaai::tools::video::{find_binary, FfmpegSyncAudioTool, FfprobeInfoTool};
+use nexus_albaai::tools::video::{
+    find_binary, FfmpegQcTool, FfmpegRenderTool, FfmpegSyncAudioTool, FfprobeInfoTool,
+};
 use nexus_albaai::tools::Tool;
 use tempfile::tempdir;
 use uuid::Uuid;
@@ -19,6 +21,31 @@ fn default_scope() -> ExecutionScope {
 
 fn is_tool_available(name: &str) -> bool {
     find_binary(name).is_some()
+}
+
+fn create_synthetic_audio(output_path: &Path, duration_secs: u32, freq: u32) -> bool {
+    let ffmpeg = match find_binary("ffmpeg") {
+        Some(bin) => bin,
+        None => return false,
+    };
+
+    let status = Command::new(ffmpeg)
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("sine=duration={}:frequency={}", duration_secs, freq),
+            "-c:a",
+            "pcm_s16le",
+            output_path.to_str().unwrap(),
+        ])
+        .output();
+
+    match status {
+        Ok(out) => out.status.success(),
+        Err(_) => false,
+    }
 }
 
 fn create_burst_audio(output_path: &Path, delay_ms: u32, duration_secs: u32) -> bool {
@@ -379,4 +406,284 @@ async fn test_ffmpeg_sync_audio_rejects_path_traversal() {
         .unwrap_err();
 
     assert!(format!("{}", err).contains("Parent traversal"));
+}
+
+#[tokio::test]
+async fn test_ffmpeg_render_edl_duration_and_qc_pass() {
+    if !is_tool_available("ffmpeg") || !is_tool_available("ffprobe") {
+        eprintln!("SKIPPED: ffmpeg or ffprobe not installed on host");
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let cam1 = dir.path().join("cam1.mp4");
+    let cam2 = dir.path().join("cam2.mp4");
+    let master = dir.path().join("master.wav");
+
+    assert!(create_synthetic_clip(&cam1, 5, 440, 320, 240, 30));
+    assert!(create_synthetic_clip(&cam2, 5, 880, 320, 240, 30));
+    assert!(create_synthetic_audio(&master, 5, 440));
+
+    let render_tool = FfmpegRenderTool::new(dir.path());
+    let scope = default_scope();
+
+    let render_res = render_tool
+        .execute(
+            &scope,
+            &serde_json::json!({
+                "output_path": "final_render.mp4",
+                "edl": {
+                    "cuts": [
+                        {
+                            "camera": "cam1.mp4",
+                            "source_start_ms": 1000,
+                            "source_end_ms": 3000,
+                            "timeline_start_ms": 0,
+                            "timeline_end_ms": 2000
+                        },
+                        {
+                            "camera": "cam2.mp4",
+                            "source_start_ms": 2000,
+                            "source_end_ms": 4000,
+                            "timeline_start_ms": 2000,
+                            "timeline_end_ms": 4000
+                        }
+                    ],
+                    "master_audio_path": "master.wav"
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+    let render_val: serde_json::Value = serde_json::from_str(&render_res).unwrap();
+    assert_eq!(render_val["duration_ms"], 4000);
+    assert!(render_val["size_bytes"].as_u64().unwrap() > 0);
+
+    let qc_tool = FfmpegQcTool::new(dir.path());
+    let qc_res = qc_tool
+        .execute(
+            &scope,
+            &serde_json::json!({
+                "rendered_path": "final_render.mp4",
+                "expected_duration_ms": 4000
+            }),
+        )
+        .await
+        .unwrap();
+
+    let qc_val: serde_json::Value = serde_json::from_str(&qc_res).unwrap();
+    assert_eq!(qc_val["qc_passed"], true, "QC report: {}", qc_res);
+    assert_eq!(qc_val["has_video"], true);
+    assert_eq!(qc_val["has_audio"], true);
+    assert_eq!(qc_val["no_long_black_frames"], true);
+    assert_eq!(qc_val["av_sync_ok"], true);
+    assert!(qc_val["failure_reasons"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_ffmpeg_render_rejects_invalid_edl() {
+    if !is_tool_available("ffmpeg") || !is_tool_available("ffprobe") {
+        eprintln!("SKIPPED: ffmpeg or ffprobe not installed on host");
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let cam1 = dir.path().join("cam1.mp4");
+    assert!(create_synthetic_clip(&cam1, 3, 440, 320, 240, 30));
+
+    let render_tool = FfmpegRenderTool::new(dir.path());
+    let scope = default_scope();
+
+    let err_exceed = render_tool
+        .execute(
+            &scope,
+            &serde_json::json!({
+                "output_path": "out1.mp4",
+                "edl": {
+                    "cuts": [
+                        {
+                            "camera": "cam1.mp4",
+                            "source_start_ms": 0,
+                            "source_end_ms": 10000,
+                            "timeline_start_ms": 0,
+                            "timeline_end_ms": 10000
+                        }
+                    ]
+                }
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{}", err_exceed).contains("exceeds camera clip duration"));
+
+    let err_overlap = render_tool
+        .execute(
+            &scope,
+            &serde_json::json!({
+                "output_path": "out2.mp4",
+                "edl": {
+                    "cuts": [
+                        {
+                            "camera": "cam1.mp4",
+                            "source_start_ms": 0,
+                            "source_end_ms": 2000,
+                            "timeline_start_ms": 0,
+                            "timeline_end_ms": 2000
+                        },
+                        {
+                            "camera": "cam1.mp4",
+                            "source_start_ms": 1000,
+                            "source_end_ms": 2500,
+                            "timeline_start_ms": 1500,
+                            "timeline_end_ms": 3000
+                        }
+                    ]
+                }
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{}", err_overlap).contains("Overlapping cuts on timeline"));
+
+    let err_missing = render_tool
+        .execute(
+            &scope,
+            &serde_json::json!({
+                "output_path": "out3.mp4",
+                "edl": {
+                    "cuts": [
+                        {
+                            "camera": "ghost_cam.mp4",
+                            "source_start_ms": 0,
+                            "source_end_ms": 1000,
+                            "timeline_start_ms": 0,
+                            "timeline_end_ms": 1000
+                        }
+                    ]
+                }
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{}", err_missing).contains("does not exist"));
+}
+
+#[tokio::test]
+async fn test_ffmpeg_render_enforces_size_and_path_limits() {
+    if !is_tool_available("ffmpeg") || !is_tool_available("ffprobe") {
+        eprintln!("SKIPPED: ffmpeg or ffprobe not installed on host");
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let cam1 = dir.path().join("cam1.mp4");
+    assert!(create_synthetic_clip(&cam1, 3, 440, 320, 240, 30));
+
+    let render_tool = FfmpegRenderTool::new(dir.path());
+    let scope = default_scope();
+
+    let err_traversal = render_tool
+        .execute(
+            &scope,
+            &serde_json::json!({
+                "output_path": "../escape.mp4",
+                "edl": {
+                    "cuts": [
+                        {
+                            "camera": "cam1.mp4",
+                            "source_start_ms": 0,
+                            "source_end_ms": 1000,
+                            "timeline_start_ms": 0,
+                            "timeline_end_ms": 1000
+                        }
+                    ]
+                }
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{}", err_traversal).contains("Parent traversal"));
+
+    let err_size = render_tool
+        .execute(
+            &scope,
+            &serde_json::json!({
+                "output_path": "tiny_limit.mp4",
+                "max_output_bytes": 100,
+                "edl": {
+                    "cuts": [
+                        {
+                            "camera": "cam1.mp4",
+                            "source_start_ms": 0,
+                            "source_end_ms": 1000,
+                            "timeline_start_ms": 0,
+                            "timeline_end_ms": 1000
+                        }
+                    ]
+                }
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{}", err_size).contains("exceeds limit"));
+    assert!(!dir.path().join("tiny_limit.mp4").exists());
+}
+
+#[tokio::test]
+async fn test_ffmpeg_qc_detects_black_frames() {
+    if !is_tool_available("ffmpeg") || !is_tool_available("ffprobe") {
+        eprintln!("SKIPPED: ffmpeg or ffprobe not installed on host");
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let black_clip = dir.path().join("black_clip.mp4");
+    let ffmpeg = find_binary("ffmpeg").unwrap();
+
+    let status = Command::new(ffmpeg)
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:duration=2:size=320x240:rate=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=duration=2:frequency=440",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-c:a",
+            "aac",
+            black_clip.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+
+    let qc_tool = FfmpegQcTool::new(dir.path());
+    let scope = default_scope();
+
+    let qc_res = qc_tool
+        .execute(
+            &scope,
+            &serde_json::json!({
+                "rendered_path": "black_clip.mp4",
+                "expected_duration_ms": 2000,
+                "max_black_frame_duration_ms": 300
+            }),
+        )
+        .await
+        .unwrap();
+
+    let qc_val: serde_json::Value = serde_json::from_str(&qc_res).unwrap();
+    assert_eq!(qc_val["qc_passed"], false);
+    assert_eq!(qc_val["no_long_black_frames"], false);
+    let reasons = qc_val["failure_reasons"].as_array().unwrap();
+    assert!(reasons
+        .iter()
+        .any(|r| r.as_str().unwrap().contains("black frames")));
 }

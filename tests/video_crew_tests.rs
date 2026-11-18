@@ -643,6 +643,248 @@ async fn test_ffmpeg_render_enforces_size_and_path_limits() {
     assert!(!dir.path().join("tiny_limit.mp4").exists());
 }
 
+fn one_cut_edl(
+    camera: &str,
+    source_start_ms: u64,
+    source_end_ms: u64,
+    timeline_start_ms: u64,
+    timeline_end_ms: u64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "cuts": [{
+            "camera": camera,
+            "source_start_ms": source_start_ms,
+            "source_end_ms": source_end_ms,
+            "timeline_start_ms": timeline_start_ms,
+            "timeline_end_ms": timeline_end_ms
+        }]
+    })
+}
+
+#[tokio::test]
+async fn test_ffmpeg_render_rejects_timeline_not_starting_at_zero() {
+    if !is_tool_available("ffmpeg") || !is_tool_available("ffprobe") {
+        eprintln!("SKIPPED: ffmpeg or ffprobe not installed on host");
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    assert!(create_synthetic_clip(
+        &dir.path().join("cam1.mp4"),
+        3,
+        440,
+        320,
+        240,
+        30
+    ));
+
+    let render_tool = FfmpegRenderTool::new(dir.path());
+    let err = render_tool
+        .execute(
+            &default_scope(),
+            &serde_json::json!({
+                "output_path": "late_start.mp4",
+                "edl": one_cut_edl("cam1.mp4", 0, 1000, 1000, 2000)
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{}", err).contains("EDL timeline must start at 0 ms, found 1000"),
+        "unexpected error: {}",
+        err
+    );
+    assert!(!dir.path().join("late_start.mp4").exists());
+}
+
+#[tokio::test]
+async fn test_ffmpeg_render_rejects_source_timeline_duration_mismatch() {
+    if !is_tool_available("ffmpeg") || !is_tool_available("ffprobe") {
+        eprintln!("SKIPPED: ffmpeg or ffprobe not installed on host");
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    assert!(create_synthetic_clip(
+        &dir.path().join("cam1.mp4"),
+        3,
+        440,
+        320,
+        240,
+        30
+    ));
+
+    let render_tool = FfmpegRenderTool::new(dir.path());
+    let err = render_tool
+        .execute(
+            &default_scope(),
+            &serde_json::json!({
+                "output_path": "drift.mp4",
+                "edl": one_cut_edl("cam1.mp4", 0, 2000, 0, 1500)
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{}", err).contains("duration mismatch"),
+        "unexpected error: {}",
+        err
+    );
+    assert!(!dir.path().join("drift.mp4").exists());
+}
+
+#[tokio::test]
+async fn test_ffmpeg_render_times_out_and_removes_partial_output() {
+    if !is_tool_available("ffmpeg") || !is_tool_available("ffprobe") {
+        eprintln!("SKIPPED: ffmpeg or ffprobe not installed on host");
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    assert!(create_synthetic_clip(
+        &dir.path().join("cam1.mp4"),
+        3,
+        440,
+        320,
+        240,
+        30
+    ));
+
+    let render_tool = FfmpegRenderTool::new(dir.path());
+    let err = render_tool
+        .execute(
+            &default_scope(),
+            &serde_json::json!({
+                "output_path": "timeout.mp4",
+                "max_render_seconds": 0,
+                "edl": one_cut_edl("cam1.mp4", 0, 2000, 0, 2000)
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{}", err).contains("timed out after 0 seconds"),
+        "unexpected error: {}",
+        err
+    );
+    assert!(!dir.path().join("timeout.mp4").exists());
+}
+
+#[tokio::test]
+async fn test_ffmpeg_qc_fails_when_duration_deviates_from_expected() {
+    if !is_tool_available("ffmpeg") || !is_tool_available("ffprobe") {
+        eprintln!("SKIPPED: ffmpeg or ffprobe not installed on host");
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    assert!(create_synthetic_clip(
+        &dir.path().join("cam1.mp4"),
+        3,
+        440,
+        320,
+        240,
+        30
+    ));
+
+    let scope = default_scope();
+    FfmpegRenderTool::new(dir.path())
+        .execute(
+            &scope,
+            &serde_json::json!({
+                "output_path": "short.mp4",
+                "edl": one_cut_edl("cam1.mp4", 0, 2000, 0, 2000)
+            }),
+        )
+        .await
+        .unwrap();
+
+    let qc_res = FfmpegQcTool::new(dir.path())
+        .execute(
+            &scope,
+            &serde_json::json!({
+                "rendered_path": "short.mp4",
+                "expected_duration_ms": 10000
+            }),
+        )
+        .await
+        .unwrap();
+    let qc_val: serde_json::Value = serde_json::from_str(&qc_res).unwrap();
+    assert_eq!(qc_val["qc_passed"], false, "QC report: {}", qc_res);
+    let reasons = qc_val["failure_reasons"].as_array().unwrap();
+    assert!(
+        reasons.iter().any(|r| r
+            .as_str()
+            .unwrap()
+            .contains("deviates from expected EDL duration")),
+        "QC report: {}",
+        qc_res
+    );
+}
+
+#[tokio::test]
+async fn test_timeline_gap_between_cuts_is_caught_by_qc() {
+    if !is_tool_available("ffmpeg") || !is_tool_available("ffprobe") {
+        eprintln!("SKIPPED: ffmpeg or ffprobe not installed on host");
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    assert!(create_synthetic_clip(
+        &dir.path().join("cam1.mp4"),
+        4,
+        440,
+        320,
+        240,
+        30
+    ));
+
+    let scope = default_scope();
+    let render_res = FfmpegRenderTool::new(dir.path())
+        .execute(
+            &scope,
+            &serde_json::json!({
+                "output_path": "gap.mp4",
+                "edl": {
+                    "cuts": [
+                        {
+                            "camera": "cam1.mp4",
+                            "source_start_ms": 0,
+                            "source_end_ms": 1000,
+                            "timeline_start_ms": 0,
+                            "timeline_end_ms": 1000
+                        },
+                        {
+                            "camera": "cam1.mp4",
+                            "source_start_ms": 2000,
+                            "source_end_ms": 3000,
+                            "timeline_start_ms": 2000,
+                            "timeline_end_ms": 3000
+                        }
+                    ]
+                }
+            }),
+        )
+        .await
+        .unwrap();
+    let render_val: serde_json::Value = serde_json::from_str(&render_res).unwrap();
+    let claimed_ms = render_val["duration_ms"].as_u64().unwrap();
+    assert_eq!(claimed_ms, 3000);
+
+    let qc_res = FfmpegQcTool::new(dir.path())
+        .execute(
+            &scope,
+            &serde_json::json!({
+                "rendered_path": "gap.mp4",
+                "expected_duration_ms": claimed_ms
+            }),
+        )
+        .await
+        .unwrap();
+    let qc_val: serde_json::Value = serde_json::from_str(&qc_res).unwrap();
+    assert_eq!(qc_val["qc_passed"], false, "QC report: {}", qc_res);
+}
+
 #[tokio::test]
 async fn test_ffmpeg_qc_detects_black_frames() {
     if !is_tool_available("ffmpeg") || !is_tool_available("ffprobe") {

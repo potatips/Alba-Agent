@@ -83,3 +83,38 @@ test("provider presets catalog schema defines all four direct LLM providers", ()
   const protocols = direct.map((p) => p.protocol);
   assert.deepEqual(protocols, ["openai", "anthropic", "gemini", "openai"]);
 });
+
+function sanitizeErrorMessage(message) {
+  if (!message) return "";
+  return message
+    .replace(/(sk-ant-[a-zA-Z0-9_-]{4})[a-zA-Z0-9_-]+([a-zA-Z0-9_-]{4})/g, "$1...$2")
+    .replace(/(sk-[a-zA-Z0-9_-]{4})[a-zA-Z0-9_-]+([a-zA-Z0-9_-]{4})/g, "$1...$2")
+    .replace(/(AIza[a-zA-Z0-9_-]{4})[a-zA-Z0-9_-]+([a-zA-Z0-9_-]{4})/g, "$1...$2")
+    .replace(/(Bearer\s+)[^\s]+/gi, "$1********");
+}
+
+function readError(error) {
+  if (error instanceof Error) return sanitizeErrorMessage(error.message);
+  return "Something went wrong. Please try again.";
+}
+
+test("sanitizeErrorMessage redacts sensitive API keys and authorization headers", () => {
+  const msg1 = "Failed to connect: sk-1234secretapikey5678 is invalid";
+  assert.equal(sanitizeErrorMessage(msg1), "Failed to connect: sk-1234...5678 is invalid");
+
+  const msg2 = "Anthropic returned 401 for sk-ant-api03-very-confidential-token-9999";
+  assert.equal(sanitizeErrorMessage(msg2), "Anthropic returned 401 for sk-ant-api0...9999");
+
+  const msg3 = "Gemini key AIzaSyA1234supersecretkey5678 denied";
+  assert.equal(sanitizeErrorMessage(msg3), "Gemini key AIzaSyA1...5678 denied");
+
+  const msg4 = "Authorization: Bearer secret-bearer-token-here expired";
+  assert.equal(sanitizeErrorMessage(msg4), "Authorization: Bearer ******** expired");
+});
+
+test("readError safely redacts secrets in error instances", () => {
+  const err = new Error("Connection error: sk-1234abcdef9876 failed");
+  assert.equal(readError(err), "Connection error: sk-1234...9876 failed");
+  assert.equal(readError(null), "Something went wrong. Please try again.");
+});
+

@@ -21,6 +21,7 @@ pub struct CreateCredentialRequest {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub is_default: Option<bool>,
+    pub available_models: Option<Vec<String>>,
     pub default_models: Option<Value>,
     pub settings: Option<Value>,
     pub secrets: Option<HashMap<String, String>>,
@@ -184,6 +185,17 @@ pub async fn create_credential_handler(
         return Err(ApiError::bad_request("preset_id cannot be empty"));
     }
 
+    state
+        .store
+        .ensure_profile_exists(
+            &user.sub,
+            &user.display_name,
+            Some(&user.email),
+            &user.tenant_id,
+            &user.workspace_id,
+        )
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
     let existing_conns = state
         .store
         .get_provider_connections_by_profile(&user.sub)
@@ -285,13 +297,78 @@ pub async fn create_credential_handler(
             .ok_or_else(|| ApiError::bad_request("Custom preset requires base_url"))?;
         let validated_url =
             crate::profiles::validate_custom_base_url(raw_url).map_err(ApiError::bad_request)?;
-        let default_models = vec!["default".to_string()];
-        ("openai".to_string(), Some(validated_url), default_models)
+
+        let mut custom_models: Vec<String> = Vec::new();
+        if let Some(ref m_list) = body.available_models {
+            for m in m_list {
+                for part in m.split(&[',', '\n', ' ', ';'][..]) {
+                    let trimmed = part.trim();
+                    if !trimmed.is_empty()
+                        && trimmed != "default"
+                        && !custom_models.iter().any(|x| x == trimmed)
+                    {
+                        custom_models.push(trimmed.to_string());
+                    }
+                }
+            }
+        }
+        if let Some(custom_ids) = body
+            .settings
+            .as_ref()
+            .and_then(|s| s.get("custom_model_ids"))
+            .and_then(|v| v.as_str())
+        {
+            for part in custom_ids.split(&[',', '\n', ' ', ';'][..]) {
+                let trimmed = part.trim();
+                if !trimmed.is_empty()
+                    && trimmed != "default"
+                    && !custom_models.iter().any(|x| x == trimmed)
+                {
+                    custom_models.push(trimmed.to_string());
+                }
+            }
+        }
+        if custom_models.is_empty() {
+            if let Some(chat_m) = body
+                .default_models
+                .as_ref()
+                .and_then(|d| d.get("chat"))
+                .and_then(|v| v.as_str())
+            {
+                let trimmed = chat_m.trim();
+                if !trimmed.is_empty()
+                    && trimmed != "default"
+                    && !custom_models.iter().any(|x| x == trimmed)
+                {
+                    custom_models.push(trimmed.to_string());
+                }
+            }
+        }
+        if custom_models.is_empty() {
+            if let Some(ref ext) = existing {
+                for m in &ext.available_models {
+                    if m != "default" && !custom_models.iter().any(|x| x == m) {
+                        custom_models.push(m.clone());
+                    }
+                }
+            }
+        }
+        if custom_models.is_empty() {
+            custom_models.push("gpt-4o".to_string());
+        }
+
+        ("openai".to_string(), Some(validated_url), custom_models)
     } else {
         return Err(ApiError::bad_request(format!(
             "Unknown or unsupported provider preset: {}",
             preset_id
         )));
+    };
+
+    let initial_status = if is_custom {
+        "UNCONFIGURED".to_string()
+    } else {
+        "CONNECTED".to_string()
     };
 
     let now = chrono::Utc::now().timestamp();
@@ -303,7 +380,7 @@ pub async fn create_credential_handler(
         preset_id: preset_id.to_string(),
         auth_type: "api_key".to_string(),
         account_label: None,
-        status: "CONNECTED".to_string(),
+        status: initial_status,
         base_url,
         is_default: body.is_default.unwrap_or(false),
         available_models: models,
@@ -377,7 +454,9 @@ async fn run_provider_health_check(
             let client = GeminiClient::new(config).map_err(|e| e.to_string())?;
             client.complete(&req).await.map_err(|e| e.to_string())?;
         }
-        "openai" | "deepseek" | "custom_openai" | "custom" | "local" | "ollama" => {
+        p if crate::profiles::is_custom_preset(p)
+            || matches!(p, "openai" | "deepseek" | "local" | "ollama") =>
+        {
             let config = ModelConfig::new(endpoint_base_url, secret, model).with_timeout(5);
             let client = OpenAiCompatibleClient::new(config).map_err(|e| e.to_string())?;
             client.complete(&req).await.map_err(|e| e.to_string())?;
@@ -438,9 +517,11 @@ pub async fn test_credential_handler(
 
     let test_model = conn
         .available_models
-        .first()
+        .iter()
+        .find(|m| m.as_str() != "default")
         .map(|s| s.as_str())
-        .unwrap_or("default");
+        .or_else(|| conn.default_models.get("chat").and_then(|v| v.as_str()))
+        .unwrap_or("gpt-4o");
 
     let start = std::time::Instant::now();
     let test_res =
@@ -449,7 +530,13 @@ pub async fn test_credential_handler(
 
     let (status, safe_error) = match test_res {
         Ok(()) => ("CONNECTED".to_string(), None),
-        Err(e) => ("ERROR".to_string(), Some(e)),
+        Err(e) => {
+            let mut sanitized = e;
+            if !secret.is_empty() {
+                sanitized = sanitized.replace(&secret, "[REDACTED]");
+            }
+            ("ERROR".to_string(), Some(sanitized))
+        }
     };
 
     let mut updated_conn = conn.clone();
@@ -588,22 +675,78 @@ pub async fn update_default_models_handler(
     Ok(Json(body))
 }
 
-pub async fn get_chat_models_handler(_auth: AuthenticatedUser) -> Result<Json<Value>, ApiError> {
-    Ok(Json(json!({
-        "models": [
-            {
-                "id": "gemini-3.8-flash-high",
-                "name": "Gemini 3.8 Flash (High)",
-                "provider": "google",
-                "context_length": 1048576,
-            },
-            {
-                "id": "claude-3-7-sonnet",
-                "name": "Claude 3.7 Sonnet",
-                "provider": "anthropic",
-                "context_length": 200000,
+pub async fn get_chat_models_handler(
+    auth: AuthenticatedUser,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
+    let user = auth.0;
+    let mut models = vec![
+        json!({
+            "id": "gemini-3.8-flash-high",
+            "name": "Gemini 3.8 Flash (High)",
+            "model": "gemini-3.8-flash-high",
+            "provider": "google",
+            "group": "Google",
+            "source": "platform",
+            "local": false,
+            "context_length": 1048576,
+        }),
+        json!({
+            "id": "claude-3-7-sonnet",
+            "name": "Claude 3.7 Sonnet",
+            "model": "claude-3-7-sonnet",
+            "provider": "anthropic",
+            "group": "Anthropic",
+            "source": "platform",
+            "local": false,
+            "context_length": 200000,
+        }),
+    ];
+
+    let conns = state
+        .store
+        .get_provider_connections_by_profile(&user.sub)
+        .unwrap_or_default();
+
+    for conn in conns {
+        if conn.status != "CONNECTED" {
+            continue;
+        }
+        let is_local = crate::profiles::is_local_preset(&conn.preset_id);
+        let group = if is_local {
+            "Local".to_string()
+        } else if crate::profiles::is_custom_preset(&conn.preset_id) {
+            "Custom".to_string()
+        } else {
+            conn.provider.clone()
+        };
+        for m in &conn.available_models {
+            if m.trim().is_empty() || m == "default" {
+                continue;
             }
-        ],
+            let provider_id = conn.preset_id.as_str();
+            let full_id = if m.contains('/') {
+                m.clone()
+            } else {
+                format!("{}/{}", provider_id, m)
+            };
+            if !models.iter().any(|existing| existing["id"] == full_id) {
+                models.push(json!({
+                    "id": full_id,
+                    "name": m,
+                    "model": m,
+                    "provider": provider_id,
+                    "group": group,
+                    "source": "workspace",
+                    "local": is_local,
+                    "context_length": 128000,
+                }));
+            }
+        }
+    }
+
+    Ok(Json(json!({
+        "models": models,
         "default": "gemini-3.8-flash-high"
     })))
 }

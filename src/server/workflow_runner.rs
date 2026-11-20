@@ -151,7 +151,7 @@ impl ModelClient for ServerModelClient {
                 .map_err(|e| ModelError::ConfigurationError(e.to_string()))?;
             if connections.is_empty() {
                 let err = ModelError::ConfigurationError(format!(
-                    "no provider connections configured for account {}",
+                    "no model configured: no provider connections configured for account {}",
                     sub
                 ));
                 if let Some(scope) = self.scope {
@@ -186,30 +186,67 @@ impl ModelClient for ServerModelClient {
 
             let (selected_conn, target_model) = if let Some(ref req_model) = request.model_override
             {
+                let (prefix, stripped) = if let Some((p, m)) = req_model.split_once('/') {
+                    (Some(p), m)
+                } else {
+                    (None, req_model.as_str())
+                };
+
                 let conn = connections
                     .iter()
-                    .find(|c| c.available_models.iter().any(|m| m == req_model))
+                    .find(|c| {
+                        if let Some(p) = prefix {
+                            if c.preset_id == p || c.provider == p {
+                                return true;
+                            }
+                        }
+                        c.available_models
+                            .iter()
+                            .any(|m| m == req_model || m == stripped)
+                    })
                     .or_else(|| {
-                        if req_model.starts_with("claude") {
+                        if stripped.starts_with("claude") {
                             connections.iter().find(|c| c.preset_id == "anthropic")
-                        } else if req_model.starts_with("gemini") {
+                        } else if stripped.starts_with("gemini") {
                             connections.iter().find(|c| c.preset_id == "google_gemini")
-                        } else if req_model.starts_with("deepseek") {
+                        } else if stripped.starts_with("deepseek") {
                             connections.iter().find(|c| c.preset_id == "deepseek")
-                        } else if req_model.starts_with("gpt-") || req_model.starts_with("o1") {
-                            connections.iter().find(|c| c.preset_id == "openai")
+                        } else if stripped.starts_with("gpt-") || stripped.starts_with("o1") {
+                            connections.iter().find(|c| {
+                                c.preset_id == "openai"
+                                    || crate::profiles::is_custom_preset(&c.preset_id)
+                            })
                         } else {
                             None
                         }
                     })
                     .or_else(|| connections.iter().find(|c| c.is_default))
                     .unwrap_or(&connections[0]);
-                (conn, req_model.clone())
+
+                let target = if let Some(p) = prefix {
+                    if conn.preset_id == p || conn.provider == p {
+                        stripped.to_string()
+                    } else {
+                        req_model.clone()
+                    }
+                } else {
+                    req_model.clone()
+                };
+
+                (conn, target)
             } else {
                 let conn = if let Some(ref default_m) = chat_default {
+                    let stripped = default_m
+                        .split_once('/')
+                        .map(|(_, m)| m)
+                        .unwrap_or(default_m.as_str());
                     connections
                         .iter()
-                        .find(|c| c.available_models.iter().any(|m| m == default_m))
+                        .find(|c| {
+                            c.available_models
+                                .iter()
+                                .any(|m| m == default_m || m == stripped)
+                        })
                         .or_else(|| connections.iter().find(|c| c.is_default))
                         .unwrap_or(&connections[0])
                 } else {
@@ -218,21 +255,38 @@ impl ModelClient for ServerModelClient {
                         .find(|c| c.is_default)
                         .unwrap_or(&connections[0])
                 };
-                let m = chat_default
+                let raw_m = chat_default
+                    .filter(|m| m != "default")
                     .or_else(|| {
                         conn.default_models
                             .get("chat")
                             .and_then(|v| v.as_str())
+                            .filter(|m| *m != "default")
                             .map(|s| s.to_string())
                     })
-                    .or_else(|| conn.available_models.first().cloned())
+                    .or_else(|| {
+                        conn.available_models
+                            .iter()
+                            .find(|m| m.as_str() != "default")
+                            .cloned()
+                    })
                     .unwrap_or_else(|| match conn.preset_id.as_str() {
                         "anthropic" => "claude-3-5-haiku".to_string(),
                         "google_gemini" => "gemini-1.5-pro".to_string(),
                         "deepseek" => "deepseek-chat".to_string(),
                         _ => "gpt-4o-mini".to_string(),
                     });
-                (conn, m)
+
+                let target = if let Some((p, stripped)) = raw_m.split_once('/') {
+                    if conn.preset_id == p || conn.provider == p {
+                        stripped.to_string()
+                    } else {
+                        raw_m
+                    }
+                } else {
+                    raw_m
+                };
+                (conn, target)
             };
 
             let endpoint_base_url = match crate::profiles::resolve_and_verify_provider_endpoint(
@@ -330,7 +384,9 @@ impl ModelClient for ServerModelClient {
                     ))?;
                     client.complete(&req).await
                 }
-                "openai" | "custom_openai" | "custom" | "local" | "ollama" => {
+                p if crate::profiles::is_custom_preset(p)
+                    || matches!(p, "openai" | "deepseek" | "local" | "ollama") =>
+                {
                     let client = OpenAiCompatibleClient::new(ModelConfig::new(
                         endpoint_base_url,
                         api_key,
@@ -435,12 +491,21 @@ pub async fn run_workflow_background(
     let model = Arc::new({
         let tenant_id_str = scope.tenant_id.to_string();
         if let Ok(Some(account)) = state.store.get_account_by_tenant_id(&tenant_id_str) {
-            ServerModelClient::for_account(
-                state.store.clone(),
-                state.credentials.clone(),
-                account.sub,
-                Some(scope),
-            )
+            let conn_count = state
+                .store
+                .get_provider_connections_by_profile(&account.sub)
+                .map(|c| c.len())
+                .unwrap_or(0);
+            if conn_count > 0 || state.model.is_none() {
+                ServerModelClient::for_account(
+                    state.store.clone(),
+                    state.credentials.clone(),
+                    account.sub,
+                    Some(scope),
+                )
+            } else {
+                state.model.clone().unwrap_or_default()
+            }
         } else if let Some(ref m) = state.model {
             m.clone()
         } else {
@@ -506,12 +571,21 @@ pub async fn resume_workflow_background(
     let model = Arc::new({
         let tenant_id_str = scope.tenant_id.to_string();
         if let Ok(Some(account)) = state.store.get_account_by_tenant_id(&tenant_id_str) {
-            ServerModelClient::for_account(
-                state.store.clone(),
-                state.credentials.clone(),
-                account.sub,
-                Some(scope),
-            )
+            let conn_count = state
+                .store
+                .get_provider_connections_by_profile(&account.sub)
+                .map(|c| c.len())
+                .unwrap_or(0);
+            if conn_count > 0 || state.model.is_none() {
+                ServerModelClient::for_account(
+                    state.store.clone(),
+                    state.credentials.clone(),
+                    account.sub,
+                    Some(scope),
+                )
+            } else {
+                state.model.clone().unwrap_or_default()
+            }
         } else if let Some(ref m) = state.model {
             m.clone()
         } else {

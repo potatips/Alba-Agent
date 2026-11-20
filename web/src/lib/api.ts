@@ -98,8 +98,17 @@ export function downloadFile(name: string, content: string, type: string): void 
   window.setTimeout(() => URL.revokeObjectURL(url), 60_000); // the download manager reads the blob asynchronously
 }
 
+export function sanitizeErrorMessage(message: string): string {
+  if (!message) return "";
+  return message
+    .replace(/(sk-ant-[a-zA-Z0-9_-]{4})[a-zA-Z0-9_-]+([a-zA-Z0-9_-]{4})/g, "$1...$2")
+    .replace(/(sk-[a-zA-Z0-9_-]{4})[a-zA-Z0-9_-]+([a-zA-Z0-9_-]{4})/g, "$1...$2")
+    .replace(/(AIza[a-zA-Z0-9_-]{4})[a-zA-Z0-9_-]+([a-zA-Z0-9_-]{4})/g, "$1...$2")
+    .replace(/(Bearer\s+)[^\s]+/gi, "$1********");
+}
+
 export function readError(error: unknown): string {
-  if (error instanceof Error) return error.message;
+  if (error instanceof Error) return sanitizeErrorMessage(error.message);
   return "Something went wrong. Please try again.";
 }
 

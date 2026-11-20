@@ -198,3 +198,94 @@ async fn test_unknown_route_returns_404_json() {
     let body: Value = res.json().await.unwrap();
     assert_eq!(body["detail"], "Not Found");
 }
+
+#[tokio::test]
+async fn test_fresh_local_session_credential_lifecycle_and_honest_status() {
+    let (base_url, _state, _tmp) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let session_res = client
+        .post(format!("{}/api/v1/auth/local-session", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(session_res.status(), reqwest::StatusCode::OK);
+    let session_body: Value = session_res.json().await.unwrap();
+    let token = session_body["access_token"].as_str().unwrap();
+
+    let cred_res = client
+        .post(format!("{}/api/v1/settings/credentials", base_url))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&serde_json::json!({
+            "preset_id": "custom_openai",
+            "base_url": "https://api.openai.com/v1",
+            "api_key": "sk-test-secret-12345678",
+            "confirm_custom_host": true,
+            "available_models": ["gpt-4o", "meta-llama/llama-3.3-70b"],
+            "settings": {
+                "custom_model_ids": "gpt-4o, meta-llama/llama-3.3-70b"
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cred_res.status(), reqwest::StatusCode::OK);
+    let cred_body: Value = cred_res.json().await.unwrap();
+    let cred_id = cred_body["id"].as_str().unwrap();
+    assert_eq!(cred_body["preset_id"], "custom_openai");
+    assert_eq!(cred_body["status"], "UNCONFIGURED");
+    let models = cred_body["available_models"].as_array().unwrap();
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0], "gpt-4o");
+    assert_eq!(models[1], "meta-llama/llama-3.3-70b");
+    assert!(!models.iter().any(|m| m == "default"));
+
+    let shop_res = client
+        .post(format!("{}/api/v1/settings/credentials", base_url))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&serde_json::json!({
+            "preset_id": "shopaikey",
+            "base_url": "https://api.shopaikey.com/v1",
+            "api_key": "sk-shop-secret-abcdef",
+            "confirm_custom_host": true,
+            "settings": {
+                "custom_model_ids": "gpt-4o, claude-3-5-sonnet"
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(shop_res.status(), reqwest::StatusCode::OK);
+    let shop_body: Value = shop_res.json().await.unwrap();
+    assert_eq!(shop_body["preset_id"], "shopaikey");
+    assert_eq!(shop_body["status"], "UNCONFIGURED");
+    let shop_models = shop_body["available_models"].as_array().unwrap();
+    assert_eq!(shop_models[0], "gpt-4o");
+    assert_eq!(shop_models[1], "claude-3-5-sonnet");
+    assert!(!shop_models.iter().any(|m| m == "default"));
+
+    let test_res = client
+        .post(format!(
+            "{}/api/v1/settings/credentials/{}/test",
+            base_url, cred_id
+        ))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(test_res.status(), reqwest::StatusCode::OK);
+    let test_body: Value = test_res.json().await.unwrap();
+    assert_eq!(test_body["status"], "ERROR");
+    let err_str = test_body["error"].as_str().unwrap_or("");
+    assert!(!err_str.contains("sk-test-secret-12345678"));
+
+    let chat_models_res = client
+        .get(format!("{}/api/v1/settings/chat-models", base_url))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(chat_models_res.status(), reqwest::StatusCode::OK);
+    let chat_models_body: Value = chat_models_res.json().await.unwrap();
+    assert!(chat_models_body["models"].is_array());
+}

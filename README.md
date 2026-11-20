@@ -1,111 +1,147 @@
 # Alba Agent
 
-**Alba Agent** (`nexus-albaai` core engine + `alba-agent-desktop` Tauri v2 desktop application) is a zero-dependency, local-first AI coding and workflow runtime written in Rust, React 19, TypeScript, and SQLite. It ships as standalone native binaries with no Python runtime, Node.js server processes, external databases, or Docker Desktop dependencies required.
+**Alba Agent** (`nexus-albaai` core engine + `alba-agent-desktop` Tauri v2 desktop application) is a local-first, zero-external-dependency AI workflow and desktop assistant written in Rust, Next.js 15, TypeScript, and SQLite. It packages as standalone native macOS binaries (`.app` and `.dmg`) with embedded frontend assets, requiring no Python runtime, Node.js daemon processes, external databases, or Docker containers.
 
 ---
 
-## Key Features
+## Release Artifacts (macOS aarch64)
 
-- **Native Rust Core Engine (`src/`):**
-  - Multi-tool OpenAI-compatible agent loop with ordered execution, strict `tool_call_id` matching, and bounded conversation compaction (`HistoryLimits`).
-  - Resumable DAG Flow orchestrator (`FlowExecutor`) supporting `Start`, `Transform`, `ToolTask`, `CommandTask`, `ParallelBranch`, `Router`, `ApprovalGate`, and `End` with atomic SQLite persistence per step.
-  - Time-travel debugging and A/B trajectory forking (`fork_trajectory` & `rewind_and_fork_flow`) with per-branch `model_override` and prompt/variable patching.
-- **Hardened Workspace Tools & OS-Native Sandbox (`src/tools/`, `src/sandbox/`):**
-  - `read_file` (2 MiB cap, symlink/traversal proof, sensitive file filtering for `.env`, `.ssh`, keys).
-  - `write_file` (atomic temp+fsync+rename with unified diff calculation and `SANDBOX_FILE_DIFF` event).
-  - `list_dir` (depth-bounded, `.gitignore`-aware walker).
-  - `run_command` via OS-native containment: Bubblewrap (`bwrap`) / kernel `unshare` namespaces on Linux and Seatbelt (`sandbox-exec`) on macOS, workspace-confined and network-disabled by default.
-- **Human-in-the-Loop Governance (`src/checkpoints/`, `src/governance/`):**
-  - Single-use atomic approval gates (`allowed_once -> executing -> consumed`) backed by `BEGIN IMMEDIATE` SQLite WAL transactions (`0600`).
-  - Separation of Duties (`author_id != approver_id` for `AllowOnce` approvals) with immutable `audit_logs`.
-- **Tauri v2 Desktop IDE (`src-tauri/`, `ui/`):**
-  - Lightweight `12.68 MiB` release binary (`alba-agent`) embedding the React 19 + Tailwind CSS v4 frontend.
-  - Three-pane IDE layout: workspace file tree & time-travel checkpoint history, Monaco Editor with inline unified diff viewer + Xterm.js sandbox output pane, interactive `[ Allow Once ]` / `[ Deny ]` Approval Card + live event timeline, and `Cmd/Ctrl+K` prompt bar.
+The release build and disk image are packaged and ad-hoc code signed:
 
----
+- **macOS Application Bundle (`.app`):**
+  `target/release/bundle/macos/Alba Agent.app`
+- **macOS Disk Image Installer (`.dmg`):**
+  `target/release/bundle/dmg/Alba Agent_0.1.0_aarch64.dmg`
 
-## Measured Release Artifacts (Linux aarch64)
+### Installation & Launch
 
-- **Headless CLI Engine (`nexus-albaai`):** `8,229,112` bytes (`7.85 MiB`), `60.35 ms` median cold startup (`--version`), `18.29 MiB` startup RSS, `113.67 ms` median single-tool loop (`read_file` fixture).
-- **Full Desktop App (`alba-agent`):** `13,300,928` bytes (`12.68 MiB`), dynamically linked against OS WebKitGTK/GTK3 without bundled Chromium or Python. See [`docs/benchmark.md`](docs/benchmark.md) for methodology and raw measurements.
+1. **Via Disk Image (.dmg):**
+   - Double-click `target/release/bundle/dmg/Alba Agent_0.1.0_aarch64.dmg` to mount the disk image.
+   - Drag `Alba Agent.app` into `/Applications`.
+   - Launch `Alba Agent` from Applications or Spotlight.
+2. **Direct Execution:**
+   - Double-click `target/release/bundle/macos/Alba Agent.app` or run from terminal:
+     ```bash
+     open "target/release/bundle/macos/Alba Agent.app"
+     ```
+3. **Standalone Relocation:**
+   - The application bundle is completely self-contained. Static frontend assets from `web/out/` are embedded inside `Contents/Resources/out/`. The app launches and functions properly when moved anywhere on the system (e.g. `/tmp/test-alba-app/`) without depending on the source tree, Node, or development servers.
 
 ---
 
-## Documentation Index
+## Provider Configuration & Supported Formats
 
-- [`docs/architecture.md`](docs/architecture.md) — Engine architecture, DAG flows, sandbox containment, and recovery semantics
-- [`docs/events.md`](docs/events.md) — Runtime JSON event contract (`schema_version = "1.0"`)
-- [`docs/compatibility.md`](docs/compatibility.md) — Contract compatibility with the Python control plane
-- [`docs/benchmark.md`](docs/benchmark.md) — Reproducible latency, RSS, and artifact size measurements
-- [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) — Consolidated permissive attributions for Rust crates and npm packages
+Alba Agent supports generic, custom, and official OpenAI-compatible LLM endpoints.
+
+### 1. Flexible Custom Provider Support
+You can connect to any third-party provider or local proxy by providing:
+- **Base URL:** Any valid HTTP/HTTPS endpoint. Examples:
+  - **OpenRouter:** `https://openrouter.ai/api/v1`
+  - **ShopAPIKey:** `https://api.shopaikey.com/v1`
+  - **Local Ollama:** `http://127.0.0.1:11434/v1`
+  - **vLLM / LocalAI / LM Studio:** `http://127.0.0.1:8000/v1`
+  - **Official OpenAI:** `https://api.openai.com/v1`
+  - Any custom corporate proxy or gateway
+- **API Key:** Stored securely in the **macOS Keychain** under service name `"alba"`. Keys are never logged in plaintext or exposed in API error messages.
+- **Model IDs:** Enter any comma-separated model identifiers (e.g. `gpt-4o`, `anthropic/claude-3.5-sonnet`, `meta-llama/llama-3.3-70b`). Alba Agent preserves the exact user-specified model strings and will never overwrite them with `"default"` or dummy fallbacks.
+
+### 2. Supported API Protocol Format
+Alba Agent natively communicates via the **standard OpenAI Chat Completions protocol**:
+- Endpoint: `POST {base_url}/chat/completions`
+- Authentication header: `Authorization: Bearer <api_key>`
+- Standard request body with `model`, `messages`, `tools`, and `tool_choice`.
+- Streaming responses via Server-Sent Events (`text/event-stream`).
+
+Services like **OpenRouter**, **ShopAPIKey**, and local inference runners (vLLM, Ollama) that adhere to this standard chat completions schema are fully supported without custom provider plugins.
+
+### 3. Honest Connection Status & Secret Redaction
+- **Initial Status:** Newly saved credentials begin in `UNCONFIGURED` state. They never display `"Đã kết nối"` (Connected) prematurely.
+- **Connection Test:** Clicking "Kiểm tra kết nối" (Test Connection) performs an actual health check against the upstream provider endpoint using the configured model ID.
+- **State Transition:** The status transitions to `CONNECTED` **only** if the upstream service returns HTTP 200 OK.
+- **Error Handling:** If upstream returns an error (401 Unauthorized, 404 Model Not Found, 429 Rate Limit, or network timeout), the status transitions to `ERROR`. The error message is sanitized (`safe_error`) to strip API keys, Bearer tokens, and sensitive headers before displaying in the UI or writing to logs.
 
 ---
 
-## Building from Source
+## Building & Packaging from Source
 
+### Prerequisites
+- macOS 13+ (Apple Silicon or Intel)
+- Rust 1.80+ (`cargo`)
+- Node.js v20+ / v24+ and `pnpm`
+- Xcode Command Line Tools (`codesign`)
+
+### 1. Build Web Frontend
 ```bash
-npm --prefix ui install
-npm --prefix ui run build
-cargo test --workspace
-cargo build --release --workspace
+export PATH="$HOME/.nvm/versions/node/v24.15.0/bin:$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
+pnpm --prefix web install
+pnpm --prefix web build
+```
+This exports the static frontend to `web/out/`.
+
+### 2. Package macOS Release (.app & .dmg)
+```bash
+npx @tauri-apps/cli build --bundles app,dmg --no-sign
+```
+
+### 3. Ad-Hoc Code Signing & Verification
+```bash
+# Sign the macOS application bundle
+codesign -s - --force --deep --options runtime "target/release/bundle/macos/Alba Agent.app"
+
+# Sign the disk image
+codesign -s - --force "target/release/bundle/dmg/Alba Agent_0.1.0_aarch64.dmg"
+
+# Verify signature
+codesign --verify --deep --strict --verbose=2 "target/release/bundle/macos/Alba Agent.app"
+codesign --verify --verbose=2 "target/release/bundle/dmg/Alba Agent_0.1.0_aarch64.dmg"
 ```
 
 ---
 
-## CLI Usage
+## Live Provider Verification
 
-Credentials are read exclusively from `NEXUS_API_KEY` or `--api-key-stdin` (no `--api-key` CLI flag exists so keys never appear in process trees). Trusted approver identity is read from `NEXUS_ACTOR_ID` or `--config` JSON.
+When an active API key is available, you can verify real provider completions against any endpoint:
 
-### 1. Start a Run
+### Via Settings UI
+1. Launch `Alba Agent.app`.
+2. Navigate to **Cài đặt (Settings) -> Nhà cung cấp (Providers)**.
+3. Select **Custom / OpenAI-compatible** or **ShopAPIKey**.
+4. Enter your Base URL, API key, and Model ID (e.g. `gpt-4o-mini` or `anthropic/claude-3.5-sonnet`).
+5. Click **Kiểm tra kết nối (Test Connection)** to verify HTTP connectivity and auth.
+6. Open **Studio** and run a prompt to verify end-to-end execution.
 
+### Via Headless CLI / Server API
+To test against an upstream provider using the CLI or Axum API:
 ```bash
-NEXUS_API_KEY="sk-..." target/release/nexus-albaai run \
-  --prompt "Inspect data.txt and summarize metrics" \
+# 1. Start headless engine with your live key
+OPENAI_BASE_URL="https://api.shopaikey.com/v1" \
+OPENAI_API_KEY="sk-..." \
+OPENAI_MODEL="gpt-4o-mini" \
+cargo run --release --bin nexus-albaai -- run \
+  --prompt "What is 2+2? Answer in one word." \
   --workspace-root ./workspace \
   --model gpt-4o-mini \
-  --db-path albaai.db
+  --db-path test_run.db
 ```
 
-### 2. Inspect Status, Approve or Deny, and Resume
-
-```bash
-target/release/nexus-albaai status --run-id <RUN_UUID> --db-path albaai.db
-
-NEXUS_ACTOR_ID="reviewer@example.com" target/release/nexus-albaai approve \
-  --run-id <RUN_UUID> \
-  --approval-id <APPROVAL_UUID> \
-  --decision allow_once \
-  --db-path albaai.db
-
-NEXUS_API_KEY="sk-..." target/release/nexus-albaai resume \
-  --run-id <RUN_UUID> \
-  --workspace-root ./workspace \
-  --db-path albaai.db
-```
-
-### 3. Fork a Checkpoint Trajectory & Cancel
-
-```bash
-target/release/nexus-albaai fork \
-  --run-id <RUN_UUID> \
-  --sequence <SEQ> \
-  --branch-label alt-model \
-  --model-override gpt-4o \
-  --prompt-override "Use concise bullet points." \
-  --db-path albaai.db
-
-target/release/nexus-albaai cancel --run-id <RUN_UUID> --db-path albaai.db
-```
+*Note: In offline test environments without live provider API keys, all automated behavioral tests run against local mock servers and hermetic fixtures.*
 
 ---
 
-## Verification Suite
+## Automated Verification Suite
+
+Run the full verification suite across Rust and Frontend:
 
 ```bash
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo deny check licenses
+# Verify no comments policy
 ./scripts/check_no_comments.sh
-npm --prefix ui run build
+
+# Run all backend unit and integration tests
+cargo test
+
+# Run macOS release packaging test
+cargo test --test g6_packaging_s5_tests -- --nocapture
+
+# Run frontend tests
+pnpm --prefix web test
 ```

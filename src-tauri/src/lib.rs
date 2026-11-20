@@ -85,6 +85,11 @@ pub fn run() {
             let static_dir = std::env::var("ALBA_STATIC_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| {
+                    if let Ok(res_out) = app.path().resource_dir().map(|r| r.join("out")) {
+                        if res_out.exists() {
+                            return res_out;
+                        }
+                    }
                     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
                     let candidate = manifest.join("../web/out");
                     if candidate.exists() {
@@ -102,7 +107,8 @@ pub fn run() {
                     .with_credentials(Arc::new(
                         nexus_albaai::credentials::MacosKeychainStore::new("alba"),
                     ))
-                    .with_static_dir(static_dir);
+                    .with_static_dir(static_dir)
+                    .with_allow_local_auth(true);
 
             let bind_addr = std::env::var("ALBA_BIND_PORT")
                 .map(|p| format!("127.0.0.1:{}", p))

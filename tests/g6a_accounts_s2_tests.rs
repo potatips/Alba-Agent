@@ -417,7 +417,10 @@ fn test_profile_crud_in_sqlite() {
     let store = SqliteCheckpointStore::new(&db_path).unwrap();
 
     let default_profile = store.ensure_default_profile().unwrap();
-    assert_eq!(default_profile.id, "default");
+    assert_eq!(
+        default_profile.id,
+        nexus_albaai::server::auth::DEFAULT_LOCAL_USER_ID
+    );
     assert!(default_profile.active);
 
     let p2 = Profile {
@@ -438,7 +441,7 @@ fn test_profile_crud_in_sqlite() {
     let active = store.get_active_profile().unwrap().unwrap();
     assert_eq!(active.id, "profile-work");
 
-    let old_default = store.get_profile("default").unwrap().unwrap();
+    let old_default = store.get_profile(&default_profile.id).unwrap().unwrap();
     assert!(!old_default.active);
 
     let deleted = store.delete_profile("profile-work").unwrap();

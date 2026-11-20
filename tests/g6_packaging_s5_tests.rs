@@ -91,6 +91,18 @@ async fn test_release_bundle_execution_and_process_tree() {
     let root_body = root_res.text().await.unwrap();
     assert!(root_body.contains("<!DOCTYPE html>"));
 
+    let local_mode_res = client
+        .get(format!(
+            "http://127.0.0.1:{}/api/v1/auth/local-mode",
+            port_val
+        ))
+        .send()
+        .await
+        .expect("failed to call local-mode endpoint on bundle");
+    assert_eq!(local_mode_res.status(), reqwest::StatusCode::OK);
+    let local_mode_body: serde_json::Value = local_mode_res.json().await.unwrap();
+    assert_eq!(local_mode_body["enabled"], true);
+
     let ps_output = Command::new("ps")
         .args(["-ef"])
         .output()

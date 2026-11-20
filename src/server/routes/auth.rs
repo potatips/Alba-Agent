@@ -95,6 +95,16 @@ pub async fn local_session_handler(
         plan: DEFAULT_LOCAL_USER_PLAN.to_string(),
         exp,
     };
+    state
+        .store
+        .ensure_profile_exists(
+            &claims.sub,
+            &claims.display_name,
+            Some(&claims.email),
+            &claims.tenant_id,
+            &claims.workspace_id,
+        )
+        .map_err(|e| ApiError::internal(e.to_string()))?;
     let secret = state.get_or_create_jwt_secret(&profile_id)?;
     let access_token = sign_token(&claims, &secret)?;
     Ok(Json(LocalSessionResponse {

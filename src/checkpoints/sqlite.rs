@@ -205,6 +205,7 @@ impl SqliteCheckpointStore {
             conn: Arc::new(Mutex::new(conn)),
         };
         store.run_migrations()?;
+        store.seed_default_local_profile()?;
         Self::enforce_sidecar_permissions(path_ref)?;
         Ok(store)
     }
@@ -218,6 +219,7 @@ impl SqliteCheckpointStore {
             conn: Arc::new(Mutex::new(conn)),
         };
         store.run_migrations()?;
+        store.seed_default_local_profile()?;
         Ok(store)
     }
 
@@ -2394,6 +2396,53 @@ impl SqliteCheckpointStore {
             updated_at: now,
         };
         self.create_profile(&default_profile)
+    }
+
+    pub fn seed_default_local_profile(&self) -> Result<(), CheckpointError> {
+        self.ensure_profile_exists(
+            crate::server::auth::DEFAULT_LOCAL_USER_ID,
+            crate::server::auth::DEFAULT_LOCAL_USER_DISPLAY_NAME,
+            Some(crate::server::auth::DEFAULT_LOCAL_USER_EMAIL),
+            crate::server::auth::DEFAULT_LOCAL_TENANT_ID,
+            crate::server::auth::DEFAULT_LOCAL_WORKSPACE_ID,
+        )
+    }
+
+    pub fn ensure_profile_exists(
+        &self,
+        sub: &str,
+        name: &str,
+        email: Option<&str>,
+        tenant_id: &str,
+        workspace_id: &str,
+    ) -> Result<(), CheckpointError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        let exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM profiles WHERE id = ?1 OR sub = ?1 LIMIT 1",
+                rusqlite::params![sub],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        let now = Utc::now().timestamp();
+        if !exists {
+            conn.execute(
+                "INSERT INTO profiles (id, name, email, is_local, active, created_at, updated_at, sub, picture, tenant_id, workspace_id)
+                 VALUES (?1, ?2, ?3, 1, 1, ?4, ?4, ?1, NULL, ?5, ?6)",
+                rusqlite::params![sub, name, email, now, tenant_id, workspace_id],
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        } else {
+            conn.execute(
+                "UPDATE profiles SET name = ?2, email = ?3, updated_at = ?4, tenant_id = ?5, workspace_id = ?6 WHERE id = ?1 OR sub = ?1",
+                rusqlite::params![sub, name, email, now, tenant_id, workspace_id],
+            )
+            .map_err(|e| CheckpointError::DatabaseError(e.to_string()))?;
+        }
+        Ok(())
     }
 
     pub fn upsert_google_account(

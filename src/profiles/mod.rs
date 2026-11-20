@@ -97,7 +97,10 @@ pub fn is_local_preset(preset_id: &str) -> bool {
 }
 
 pub fn is_custom_preset(preset_id: &str) -> bool {
-    matches!(preset_id, "custom_openai" | "custom")
+    matches!(
+        preset_id,
+        "custom_openai" | "custom" | "shopaikey" | "openrouter"
+    ) || preset_id.starts_with("custom_")
 }
 
 pub fn official_preset_base_url(preset_id: &str) -> Option<&'static str> {
